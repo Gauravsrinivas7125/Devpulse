@@ -330,14 +330,13 @@ async def get_risk_score(user_id: str = Depends(verify_token)):
                 ])
     
     # Patent 1: Ingest cost anomalies from enhanced_cost_tracker
-    for anomaly in enhanced_cost_tracker.get_anomalies():
+    for idx, anomaly in enumerate(enhanced_cost_tracker.get_anomalies()):
         user_engine.ingest_cost_anomaly(
+            anomaly_id=anomaly.get("id", f"cost-anomaly-{idx}"),
             anomaly_type=anomaly.get("type", "spike"),
-            severity=anomaly.get("severity", "MEDIUM"),
             model=anomaly.get("model", "unknown"),
             expected_cost=anomaly.get("expected_cost", 0),
             actual_cost=anomaly.get("actual_cost", 0),
-            deviation_percentage=anomaly.get("deviation_pct", 0),
             description=anomaly.get("description", ""),
         )
     
