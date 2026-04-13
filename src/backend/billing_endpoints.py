@@ -3,12 +3,9 @@ DevPulse - Billing Endpoints
 Stripe subscription and payment management
 """
 
-import os
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
 from typing import Dict, Any, Optional
-import jwt
 
 try:
     from services.stripe_billing import billing_service, PricingTier
@@ -17,35 +14,9 @@ except ImportError:
 
 from .models import User
 from .database import get_db
-from .auth_service_db import SECRET_KEY, ALGORITHM
+from .auth import verify_token as _verify_token  # shared auth module
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
-
-_security = HTTPBearer()
-_JWT_SECRET = os.getenv("SECRET_KEY", SECRET_KEY)
-_JWT_ALGORITHM = ALGORITHM
-
-
-async def _verify_token(credentials=Depends(_security), db: Session = Depends(get_db)) -> str:
-    """Verify JWT token and return user_id."""
-    token = credentials.credentials
-    user_id = None
-    # Try JWT first
-    try:
-        payload = jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
-        user_id = payload.get("sub")
-    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
-        pass
-    # Legacy token support — ONLY in development mode to prevent auth bypass in production
-    if not user_id and os.getenv("ENVIRONMENT", "production") == "development":
-        if token and token.startswith("token_"):
-            user_id = token.replace("token_", "")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    return user_id
 
 
 def _get_user_stripe_customer_id(db: Session, user_id: str) -> str:

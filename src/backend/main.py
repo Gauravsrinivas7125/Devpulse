@@ -253,6 +253,8 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not pwd_context.verify(password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    if not user.email_verified:
+        raise HTTPException(status_code=403, detail="Please verify your email first")
     user.last_login = datetime.utcnow()
     db.commit()
     access_token = _create_access_token(user.id, user.email)
@@ -274,6 +276,8 @@ async def refresh_token_endpoint(refresh_token: str, db: Session = Depends(get_d
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
+        if not user.email_verified:
+            raise HTTPException(status_code=403, detail="Please verify your email first")
         new_access_token = _create_access_token(user.id, user.email)
         return {"access_token": new_access_token, "token_type": "bearer"}
     except jwt.ExpiredSignatureError:
@@ -766,7 +770,7 @@ async def track_thinking_tokens(
 async def get_token_analytics(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
     # Query per-user token usage from DB to prevent cross-user data leaks
     usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).order_by(TokenUsage.created_at.desc()).limit(100).all()
-    total_cost = sum(u.cost or 0 for u in usages)
+    total_cost = sum(u.cost_usd or 0 for u in usages)
     total_input = sum(u.input_tokens or 0 for u in usages)
     total_output = sum(u.output_tokens or 0 for u in usages)
     total_thinking = sum(u.thinking_tokens or 0 for u in usages)
@@ -776,7 +780,7 @@ async def get_token_analytics(user_id: str = Depends(verify_token), db: Session 
         if m not in by_model:
             by_model[m] = {"requests": 0, "cost": 0, "input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0}
         by_model[m]["requests"] += 1
-        by_model[m]["cost"] += u.cost or 0
+        by_model[m]["cost"] += u.cost_usd or 0
         by_model[m]["input_tokens"] += u.input_tokens or 0
         by_model[m]["output_tokens"] += u.output_tokens or 0
         by_model[m]["thinking_tokens"] += u.thinking_tokens or 0
@@ -803,7 +807,7 @@ class WebSocketManager:
                 user_id = payload.get("sub")
             except (jwt.InvalidTokenError, jwt.ExpiredSignatureError):
                 pass
-            if not user_id and token and token.startswith("token_"):
+            if not user_id and os.getenv("ENVIRONMENT", "production") == "development" and token and token.startswith("token_"):
                 user_id = token.replace("token_", "")
             if not user_id:
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -1261,11 +1265,17 @@ async def general_exception_handler(request, exc):
 async def track_llm_cost(
     request_id: str, model: str, prompt_tokens: int, completion_tokens: int,
     thinking_tokens: int = 0, session_id: Optional[str] = None, endpoint: Optional[str] = None,
-    user_id: str = Depends(verify_token),
+    user_id: str = Depends(verify_token), db: Session = Depends(get_db),
 ):
     entry = enhanced_cost_tracker.track(request_id=request_id, model=model, prompt_tokens=prompt_tokens,
                                          completion_tokens=completion_tokens, thinking_tokens=thinking_tokens,
                                          session_id=session_id, endpoint=endpoint)
+    # Persist to DB so cost-tracker read endpoints (which query TokenUsage) return this data
+    crud.create_token_usage(
+        db, user_id=user_id, model=model, input_tokens=prompt_tokens,
+        output_tokens=completion_tokens, thinking_tokens=thinking_tokens,
+        cost=entry.cost_usd,
+    )
     analytics_engine.log_event("cost.tracked", {"model": model, "cost": entry.cost_usd, "tokens": entry.usage.total_tokens}, user_id=user_id)
     return {"request_id": entry.request_id, "model": entry.model, "cost_usd": entry.cost_usd,
             "tokens": {"prompt": entry.usage.prompt_tokens, "completion": entry.usage.completion_tokens,
@@ -1273,28 +1283,55 @@ async def track_llm_cost(
 
 
 @app.get("/api/cost-tracker/summary")
-async def get_cost_summary(user_id: str = Depends(verify_token)):
-    return enhanced_cost_tracker.get_summary()
+async def get_cost_summary(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    # Query per-user cost data from DB to prevent cross-user data leaks
+    usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).all()
+    total_cost = sum(u.cost_usd or 0 for u in usages)
+    return {
+        "total_cost_usd": round(total_cost, 6),
+        "total_requests": len(usages),
+        "user_id": user_id,
+    }
 
 
 @app.get("/api/cost-tracker/models")
-async def get_cost_by_model(user_id: str = Depends(verify_token)):
-    return {"models": enhanced_cost_tracker.get_model_breakdown()}
+async def get_cost_by_model(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).all()
+    models: Dict[str, Any] = {}
+    for u in usages:
+        m = u.model or "unknown"
+        if m not in models:
+            models[m] = {"requests": 0, "cost": 0, "input_tokens": 0, "output_tokens": 0}
+        models[m]["requests"] += 1
+        models[m]["cost"] += u.cost_usd or 0
+        models[m]["input_tokens"] += u.input_tokens or 0
+        models[m]["output_tokens"] += u.output_tokens or 0
+    return {"models": models}
 
 
 @app.get("/api/cost-tracker/utilization")
-async def get_cost_utilization(user_id: str = Depends(verify_token)):
-    return enhanced_cost_tracker.get_utilization()
+async def get_cost_utilization(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).all()
+    total_cost = sum(u.cost_usd or 0 for u in usages)
+    return {"total_cost_usd": round(total_cost, 6), "request_count": len(usages), "user_id": user_id}
 
 
 @app.get("/api/cost-tracker/daily")
-async def get_daily_costs(days: int = 30, user_id: str = Depends(verify_token)):
-    return {"daily": enhanced_cost_tracker.get_daily_breakdown(days)}
+async def get_daily_costs(days: int = 30, user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id, TokenUsage.created_at >= cutoff).all()
+    daily: Dict[str, float] = {}
+    for u in usages:
+        day = u.created_at.strftime("%Y-%m-%d") if u.created_at else "unknown"
+        daily[day] = daily.get(day, 0) + (u.cost_usd or 0)
+    return {"daily": [{"date": k, "cost": round(v, 6)} for k, v in sorted(daily.items())]}
 
 
 @app.get("/api/cost-tracker/anomalies")
-async def get_cost_anomalies(user_id: str = Depends(verify_token)):
-    return {"anomalies": enhanced_cost_tracker.get_anomalies()}
+async def get_cost_anomalies(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    # Return empty anomalies list — anomaly detection requires user-scoped data
+    usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).all()
+    return {"anomalies": [], "total_tracked": len(usages)}
 
 
 @app.post("/api/cost-tracker/budget")
@@ -1483,6 +1520,10 @@ async def get_scan_session(session_id: str, user_id: str = Depends(verify_token)
 
 @app.post("/api/scan-sessions/{session_id}/notes")
 async def add_scan_note(session_id: str, note: str, user_id: str = Depends(verify_token)):
+    # Verify ownership before allowing note addition
+    session = scan_session_history.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
     if not scan_session_history.add_note(session_id, note):
         raise HTTPException(status_code=404, detail="Session not found")
     return {"success": True}

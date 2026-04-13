@@ -189,20 +189,7 @@ def get_user_token_usage(db: Session, user_id: str, limit: int = 100) -> List[To
 # COMPLIANCE REPORT OPERATIONS
 # ============================================================================
 
-def create_compliance_report(db: Session, user_id: str, collection_id: str, report_type: str, compliance_percentage: float, requirements_data: Dict) -> ComplianceReport:
-    """Create a compliance report"""
-    report = ComplianceReport(
-        user_id=user_id,
-        collection_id=collection_id,
-        report_type=report_type,
-        compliance_percentage=compliance_percentage,
-        requirements_data=requirements_data
-    )
-    db.add(report)
-    db.commit()
-    db.refresh(report)
-    logger.info(f"Created {report_type} report for collection {collection_id}")
-    return report
+# create_compliance_report (legacy removed — see updated version below with explicit id/created_at)
 
 
 def get_collection_compliance_reports(db: Session, collection_id: str) -> List[ComplianceReport]:
