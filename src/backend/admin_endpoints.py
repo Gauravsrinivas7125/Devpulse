@@ -39,9 +39,10 @@ async def verify_admin(
         user_id = payload.get("sub")
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
         pass
-    # Fallback to legacy token
-    if not user_id and token and token.startswith("token_"):
-        user_id = token.replace("token_", "")
+    # Legacy token support — ONLY in development mode to prevent auth bypass in production
+    if not user_id and os.getenv("ENVIRONMENT", "production") == "development":
+        if token and token.startswith("token_"):
+            user_id = token.replace("token_", "")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     current_user = db.query(User).filter(User.id == user_id).first()

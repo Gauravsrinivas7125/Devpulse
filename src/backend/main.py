@@ -138,7 +138,7 @@ def _create_refresh_token(user_id: str) -> str:
 
 
 async def verify_token(credentials=Depends(security), db: Session = Depends(get_db)) -> str:
-    """Verify JWT token and return user_id. Supports JWT and legacy token_<user_id>."""
+    """Verify JWT token and return user_id."""
     token = credentials.credentials
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -153,12 +153,13 @@ async def verify_token(credentials=Depends(security), db: Session = Depends(get_
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         pass
-    # Legacy token support for backward compatibility
-    if token and token.startswith("token_"):
-        user_id = token.replace("token_", "")
-        user = db.query(User).filter(User.id == user_id).first()
-        if user:
-            return user_id
+    # Legacy token support — ONLY in development mode to prevent auth bypass in production
+    if os.getenv("ENVIRONMENT", "production") == "development":
+        if token and token.startswith("token_"):
+            user_id = token.replace("token_", "")
+            user = db.query(User).filter(User.id == user_id).first()
+            if user:
+                return user_id
     raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
@@ -173,7 +174,7 @@ async def rate_limit_middleware(request: Request, call_next):
         return await call_next(request)
     client_ip = request.client.host if request.client else "unknown"
     auth_header = request.headers.get("authorization", "")
-    client_key = f"ratelimit:{auth_header[:20] if auth_header else client_ip}"
+    client_key = f"ratelimit:{client_ip}"
     current_minute = int(time.time() // 60)
     rate_key = f"{client_key}:{current_minute}"
     count = redis_client.incr(rate_key)
@@ -762,8 +763,28 @@ async def track_thinking_tokens(
 
 
 @app.get("/api/tokens/analytics")
-async def get_token_analytics(user_id: str = Depends(verify_token)):
-    return token_tracker.get_analytics()
+async def get_token_analytics(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    # Query per-user token usage from DB to prevent cross-user data leaks
+    usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).order_by(TokenUsage.created_at.desc()).limit(100).all()
+    total_cost = sum(u.cost or 0 for u in usages)
+    total_input = sum(u.input_tokens or 0 for u in usages)
+    total_output = sum(u.output_tokens or 0 for u in usages)
+    total_thinking = sum(u.thinking_tokens or 0 for u in usages)
+    by_model: Dict[str, Any] = {}
+    for u in usages:
+        m = u.model or "unknown"
+        if m not in by_model:
+            by_model[m] = {"requests": 0, "cost": 0, "input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0}
+        by_model[m]["requests"] += 1
+        by_model[m]["cost"] += u.cost or 0
+        by_model[m]["input_tokens"] += u.input_tokens or 0
+        by_model[m]["output_tokens"] += u.output_tokens or 0
+        by_model[m]["thinking_tokens"] += u.thinking_tokens or 0
+    return {
+        "total_requests": len(usages), "total_cost": round(total_cost, 6),
+        "total_input_tokens": total_input, "total_output_tokens": total_output,
+        "total_thinking_tokens": total_thinking, "by_model": by_model,
+    }
 
 
 # ============================================================================

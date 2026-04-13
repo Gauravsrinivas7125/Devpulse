@@ -27,7 +27,7 @@ _JWT_ALGORITHM = ALGORITHM
 
 
 async def _verify_token(credentials=Depends(_security), db: Session = Depends(get_db)) -> str:
-    """Verify JWT token and return user_id. Supports JWT and legacy token_<user_id>."""
+    """Verify JWT token and return user_id."""
     token = credentials.credentials
     user_id = None
     # Try JWT first
@@ -36,9 +36,10 @@ async def _verify_token(credentials=Depends(_security), db: Session = Depends(ge
         user_id = payload.get("sub")
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
         pass
-    # Fallback to legacy token
-    if not user_id and token and token.startswith("token_"):
-        user_id = token.replace("token_", "")
+    # Legacy token support — ONLY in development mode to prevent auth bypass in production
+    if not user_id and os.getenv("ENVIRONMENT", "production") == "development":
+        if token and token.startswith("token_"):
+            user_id = token.replace("token_", "")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     user = db.query(User).filter(User.id == user_id).first()
