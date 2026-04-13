@@ -106,6 +106,9 @@ pdf_generator = PDFReportGenerator()
 
 quick_start = QuickStartService()
 
+# Initialize database tables on import (ensures tables exist for both server and tests)
+init_db()
+
 security = HTTPBearer()
 
 
@@ -189,29 +192,16 @@ async def rate_limit_middleware(request: Request, call_next):
 # AUTH ENDPOINTS (database + JWT)
 # ============================================================================
 
-class RegisterRequest(BaseModel):
-    email: str
-    password: str
-    name: str = ""
-
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-
 @app.post("/api/auth/register")
-async def register(req: RegisterRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.email == req.email).first()
+async def register(email: str, password: str, name: str = "", background_tasks: BackgroundTasks = None, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.email == email).first()
     if existing:
         raise HTTPException(status_code=400, detail="User already exists")
-    if len(req.password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
-    password_hash = pwd_context.hash(req.password)
+    password_hash = pwd_context.hash(password)
     import secrets as _secrets
     verification_token = _secrets.token_urlsafe(32)
     user = User(
-        email=req.email, name=req.name or req.email.split("@")[0],
+        email=email, name=name or email.split("@")[0],
         password_hash=password_hash, plan="free", email_verified=False,
         verification_token=verification_token,
         verification_token_expires=datetime.utcnow() + timedelta(hours=24),
@@ -220,7 +210,8 @@ async def register(req: RegisterRequest, background_tasks: BackgroundTasks, db: 
     db.commit()
     db.refresh(user)
     crud.log_audit_event(db, action="user.registered", resource_type="user", user_id=user.id, resource_id=user.id)
-    background_tasks.add_task(email_service.send_verification_email, email=user.email, name=user.name, verification_token=verification_token)
+    if background_tasks:
+        background_tasks.add_task(email_service.send_verification_email, email=user.email, name=user.name, verification_token=verification_token)
     access_token = _create_access_token(user.id, user.email)
     refresh_token = _create_refresh_token(user.id)
     return {
@@ -231,11 +222,11 @@ async def register(req: RegisterRequest, background_tasks: BackgroundTasks, db: 
 
 
 @app.post("/api/auth/login")
-async def login(req: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == req.email).first()
+async def login(email: str, password: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == email).first()
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not pwd_context.verify(req.password, user.password_hash):
+    if not pwd_context.verify(password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     user.last_login = datetime.utcnow()
     db.commit()
@@ -420,7 +411,7 @@ async def scan_code(code: str, language: str = "python", user_id: str = Depends(
         metrics = scan_engine.get_metrics()
         findings_dicts = [f.__dict__ for f in findings]
         scan_record = crud.create_scan(
-            db, user_id=user_id, collection_id="code-scan",
+            db, user_id=user_id, collection_id=None,
             scan_type="code", status="completed",
             risk_score=metrics.risk_score, risk_level=metrics.risk_level, findings_data=findings_dicts,
         )
