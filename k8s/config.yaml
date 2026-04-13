@@ -1,0 +1,236 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devpulse
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: devpulse-secrets
+  namespace: devpulse
+type: Opaque
+stringData:
+  database-url: "postgresql://devpulse:devpulse@postgres.devpulse.svc.cluster.local:5432/devpulse"
+  stripe-api-key: "sk_live_YOUR_STRIPE_KEY_HERE"
+  openai-api-key: "sk-YOUR_OPENAI_KEY_HERE"
+  slack-webhook-url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+  secret-key: "your-32-character-random-secret-key-here"
+  sendgrid-api-key: "SG.YOUR_SENDGRID_KEY_HERE"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: devpulse-config
+  namespace: devpulse
+data:
+  app.conf: |
+    [app]
+    debug = false
+    environment = production
+    
+    [database]
+    pool_size = 20
+    max_overflow = 40
+    
+    [security]
+    cors_origins = ["https://devpulse.io", "https://app.devpulse.io"]
+    csrf_enabled = true
+    rate_limit_enabled = true
+    
+    [features]
+    email_verification = true
+    compliance_reports = true
+    kill_switch = true
+    shadow_api_detection = true
+    llm_cost_tracking = true
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: devpulse
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: standard
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: devpulse
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_DB
+          value: devpulse
+        - name: POSTGRES_USER
+          value: devpulse
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: devpulse-secrets
+              key: postgres-password
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U devpulse
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: devpulse
+spec:
+  clusterIP: None
+  ports:
+  - port: 5432
+    targetPort: 5432
+  selector:
+    app: postgres
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: devpulse-dlq-processor
+  namespace: devpulse
+spec:
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: dlq-processor
+            image: devpulse:latest
+            command: ["python", "-m", "src.backend.dlq_processor"]
+            env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: devpulse-secrets
+                  key: database-url
+          restartPolicy: OnFailure
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: devpulse-cleanup
+  namespace: devpulse
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: cleanup
+            image: devpulse:latest
+            command: ["python", "-m", "src.backend.cleanup"]
+            env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: devpulse-secrets
+                  key: database-url
+          restartPolicy: OnFailure
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: devpulse-ingress
+  namespace: devpulse
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - devpulse.io
+    - api.devpulse.io
+    - app.devpulse.io
+    secretName: devpulse-tls
+  rules:
+  - host: api.devpulse.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: devpulse-backend
+            port:
+              number: 80
+  - host: app.devpulse.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: devpulse-frontend
+            port:
+              number: 80
+  - host: devpulse.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: devpulse-frontend
+            port:
+              number: 80
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: devpulse-backend
+  namespace: devpulse
+spec:
+  selector:
+    matchLabels:
+      app: devpulse
+      component: backend
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s

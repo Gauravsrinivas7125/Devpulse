@@ -1,0 +1,135 @@
+{
+  "name": "devpulse-security",
+  "displayName": "DevPulse Security",
+  "description": "API security scanning, risk scoring, and findings review inside VS Code. Import Postman/OpenAPI collections, run vulnerability scans, and view compliance reports without leaving your editor.",
+  "version": "1.0.0",
+  "publisher": "devpulse",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anugownori/pulse-dashboard"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Testing", "Linters", "Other"],
+  "keywords": ["api", "security", "scanning", "postman", "openapi", "compliance", "pci-dss", "devpulse"],
+  "icon": "media/devpulse-icon.png",
+  "galleryBanner": {
+    "color": "#1e40af",
+    "theme": "dark"
+  },
+  "activationEvents": [
+    "onView:devpulseSecurity",
+    "onCommand:devpulse.scanFile",
+    "onCommand:devpulse.importCollection",
+    "onLanguage:json"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "devpulse",
+          "title": "DevPulse",
+          "icon": "media/devpulse.svg"
+        }
+      ]
+    },
+    "views": {
+      "devpulse": [
+        {
+          "id": "devpulseSecurity",
+          "name": "Security Panel"
+        },
+        {
+          "id": "devpulseFindings",
+          "name": "Findings"
+        },
+        {
+          "id": "devpulseCompliance",
+          "name": "Compliance"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "devpulse.refreshFindings",
+        "title": "DevPulse: Refresh Findings",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "devpulse.scanFile",
+        "title": "DevPulse: Scan Current File",
+        "icon": "$(search)"
+      },
+      {
+        "command": "devpulse.importCollection",
+        "title": "DevPulse: Import Collection",
+        "icon": "$(add)"
+      },
+      {
+        "command": "devpulse.showRiskScore",
+        "title": "DevPulse: Show Risk Score",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "devpulse.generateComplianceReport",
+        "title": "DevPulse: Generate Compliance Report"
+      },
+      {
+        "command": "devpulse.killSwitch",
+        "title": "DevPulse: Activate Kill Switch",
+        "icon": "$(stop)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "devpulse.scanFile",
+          "group": "devpulse",
+          "when": "editorTextFocus"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "devpulse.refreshFindings",
+          "when": "view == devpulseSecurity",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "DevPulse",
+      "properties": {
+        "devpulse.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "DevPulse API server URL"
+        },
+        "devpulse.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Authentication token for DevPulse API"
+        },
+        "devpulse.autoScan": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically scan files on save"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./tsconfig.extension.json",
+    "watch": "tsc -watch -p ./tsconfig.extension.json",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.3.0"
+  }
+}
