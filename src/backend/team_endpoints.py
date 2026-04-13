@@ -4,6 +4,7 @@ Workspace collaboration and team member management
 """
 
 import logging
+from datetime import datetime
 from typing import Dict, Any, List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -33,8 +34,9 @@ async def invite_team_member(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        # Check if invitee already exists
+        # Check if invitee already exists for this user
         existing = db.query(TeamMember).filter(
+            TeamMember.user_id == current_user["user_id"],
             TeamMember.email == email
         ).first()
         
@@ -43,8 +45,7 @@ async def invite_team_member(
         
         # Create team member invitation
         team_member = TeamMember(
-            workspace_id=user.id,
-            user_id=None,  # Will be set when user accepts
+            user_id=current_user["user_id"],
             email=email,
             role=role,
             invited_at=datetime.utcnow()
@@ -52,12 +53,17 @@ async def invite_team_member(
         
         db.add(team_member)
         db.commit()
+        db.refresh(team_member)
         
         # Send invitation email
-        email_service.send_invitation_email(
+        email_service.send_security_alert(
             email=email,
-            workspace_name=user.name,
-            invitation_link=f"https://devpulse.io/join?token={team_member.id}"
+            name=email.split("@")[0],
+            alert_type="Team Invitation",
+            details={
+                "description": f"You have been invited to join {user.name}'s workspace on DevPulse.",
+                "action": "Visit https://devpulse.io to accept the invitation."
+            }
         )
         
         logger.info(f"Team member invited: {email}")
@@ -76,7 +82,7 @@ async def list_team_members(
     """List team members"""
     try:
         members = db.query(TeamMember).filter(
-            TeamMember.workspace_id == current_user["user_id"]
+            TeamMember.user_id == current_user["user_id"]
         ).all()
         
         return {
@@ -87,7 +93,7 @@ async def list_team_members(
                     "email": m.email,
                     "role": m.role,
                     "joined_at": m.joined_at.isoformat() if m.joined_at else None,
-                    "invited_at": m.invited_at.isoformat()
+                    "invited_at": m.invited_at.isoformat() if m.invited_at else None
                 }
                 for m in members
             ]
@@ -108,7 +114,7 @@ async def remove_team_member(
     try:
         member = db.query(TeamMember).filter(
             TeamMember.id == member_id,
-            TeamMember.workspace_id == current_user["user_id"]
+            TeamMember.user_id == current_user["user_id"]
         ).first()
         
         if not member:
@@ -120,6 +126,8 @@ async def remove_team_member(
         logger.info(f"Team member removed: {member_id}")
         return {"success": True, "message": "Member removed"}
     
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error removing team member: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -136,7 +144,7 @@ async def update_member_role(
     try:
         member = db.query(TeamMember).filter(
             TeamMember.id == member_id,
-            TeamMember.workspace_id == current_user["user_id"]
+            TeamMember.user_id == current_user["user_id"]
         ).first()
         
         if not member:
@@ -154,6 +162,3 @@ async def update_member_role(
     except Exception as e:
         logger.error(f"Error updating member role: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-from datetime import datetime

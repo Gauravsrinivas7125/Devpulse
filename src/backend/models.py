@@ -72,7 +72,7 @@ class Scan(Base):
     
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
-    collection_id = Column(String(36), ForeignKey("collections.id"), nullable=False, index=True)
+    collection_id = Column(String(36), ForeignKey("collections.id", ondelete="SET NULL"), nullable=True, index=True)
     scan_type = Column(String(50), default="full", nullable=False)
     status = Column(String(50), default="pending", nullable=False)
     risk_score = Column(Float, default=0.0)
@@ -139,7 +139,7 @@ class TokenUsage(Base):
     
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
-    request_id = Column(String(255), nullable=False)
+    request_id = Column(String(255), nullable=True)
     model = Column(String(100), nullable=False)
     input_tokens = Column(Integer, default=0)
     output_tokens = Column(Integer, default=0)
@@ -185,3 +185,54 @@ class AuditLog(Base):
     
     def __repr__(self):
         return f"<AuditLog {self.action}>"
+
+
+class KillSwitchEvent(Base):
+    """Kill switch event log for autonomous agent protection (Patent 3)"""
+    __tablename__ = "kill_switch_events"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    event_type = Column(String(50), nullable=False)  # block, budget_exceeded, loop_detected, cost_recorded
+    request_id = Column(String(255), nullable=True)
+    agent_id = Column(String(255), nullable=True)
+    model = Column(String(100), nullable=True)
+    cost = Column(Float, default=0.0)
+    reason = Column(Text, nullable=True)
+    details = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def __repr__(self):
+        return f"<KillSwitchEvent {self.event_type}>"
+
+
+class Workspace(Base):
+    """User workspace model"""
+    __tablename__ = "workspaces"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    owner_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    plan = Column(String(50), default="free", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def __repr__(self):
+        return f"<Workspace {self.name}>"
+
+
+class ShadowAPIScanResult(Base):
+    """Shadow API scan result persistence"""
+    __tablename__ = "shadow_api_scan_results"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    collection_id = Column(String(36), nullable=True, index=True)
+    workspace_path = Column(String(1024), nullable=True)
+    total_shadow_apis = Column(Integer, default=0)
+    results_data = Column(JSON, nullable=True)
+    risk_impact = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def __repr__(self):
+        return f"<ShadowAPIScanResult {self.id}>"
