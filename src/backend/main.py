@@ -537,11 +537,19 @@ async def block_request(request_id: str, reason: str, user_id: str = Depends(ver
 
 
 @app.get("/api/kill-switch/status")
-async def get_kill_switch_status(user_id: str = Depends(verify_token)):
+async def get_kill_switch_status(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    # Return user-scoped data from DB to avoid cross-user data leaks
+    user_events = db.query(KillSwitchEvent).filter(KillSwitchEvent.user_id == user_id).order_by(KillSwitchEvent.created_at.desc()).limit(10).all()
+    user_blocked = db.query(KillSwitchEvent).filter(KillSwitchEvent.user_id == user_id, KillSwitchEvent.event_type == "block").count()
+    user_trail = [
+        {"event_type": e.event_type, "request_id": e.request_id, "reason": e.reason,
+         "timestamp": e.created_at.isoformat() if e.created_at else None}
+        for e in user_events
+    ]
     return {
-        "enabled": kill_switch.is_enabled(), "blocked_count": kill_switch.get_blocked_count(),
+        "enabled": kill_switch.is_enabled(), "blocked_count": user_blocked,
         "patterns": kill_switch.get_active_patterns(), "budget_status": kill_switch.get_budget_status(),
-        "loop_detections": kill_switch.get_loop_detections(), "audit_trail": kill_switch.get_audit_trail()[-10:],
+        "loop_detections": kill_switch.get_loop_detections(), "audit_trail": user_trail,
     }
 
 

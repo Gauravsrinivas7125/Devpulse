@@ -58,22 +58,24 @@ def _get_user_stripe_customer_id(db: Session, user_id: str) -> str:
 def _verify_subscription_ownership(db: Session, user_id: str, subscription_id: str) -> None:
     """Verify that a subscription belongs to the authenticated user's Stripe customer."""
     user = db.query(User).filter(User.id == user_id).first()
-    if user and user.stripe_subscription_id == subscription_id:
-        return
-    # If no direct match, allow if user has a stripe_customer_id (Stripe will enforce at API level)
     if not user or not user.stripe_customer_id:
         raise HTTPException(status_code=403, detail="You do not have an active billing account.")
+    if user.stripe_subscription_id == subscription_id:
+        return
+    # No match — reject access
+    raise HTTPException(status_code=403, detail="This subscription does not belong to your account.")
 
 
 @router.post("/create-customer")
 async def create_customer(
-    email: str,
-    name: str,
     user_id: str = Depends(_verify_token),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Create a Stripe customer"""
-    return billing_service.create_customer(user_id, email, name)
+    """Create a Stripe customer using the authenticated user's email and name."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return billing_service.create_customer(user_id, user.email, user.name)
 
 
 @router.post("/subscribe")
@@ -174,5 +176,7 @@ async def get_invoice(
     user_id: str = Depends(_verify_token),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Get invoice details"""
+    """Get invoice details (ownership enforced via customer check)"""
+    # Ensure user has a linked Stripe customer before allowing invoice access
+    _get_user_stripe_customer_id(db, user_id)
     return billing_service.get_invoice(invoice_id)
