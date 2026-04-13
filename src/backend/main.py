@@ -276,6 +276,8 @@ async def refresh_token_endpoint(refresh_token: str, db: Session = Depends(get_d
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
+        if not user.email_verified:
+            raise HTTPException(status_code=403, detail="Please verify your email first")
         new_access_token = _create_access_token(user.id, user.email)
         return {"access_token": new_access_token, "token_type": "bearer"}
     except jwt.ExpiredSignatureError:
@@ -1263,11 +1265,17 @@ async def general_exception_handler(request, exc):
 async def track_llm_cost(
     request_id: str, model: str, prompt_tokens: int, completion_tokens: int,
     thinking_tokens: int = 0, session_id: Optional[str] = None, endpoint: Optional[str] = None,
-    user_id: str = Depends(verify_token),
+    user_id: str = Depends(verify_token), db: Session = Depends(get_db),
 ):
     entry = enhanced_cost_tracker.track(request_id=request_id, model=model, prompt_tokens=prompt_tokens,
                                          completion_tokens=completion_tokens, thinking_tokens=thinking_tokens,
                                          session_id=session_id, endpoint=endpoint)
+    # Persist to DB so cost-tracker read endpoints (which query TokenUsage) return this data
+    crud.create_token_usage(
+        db, user_id=user_id, model=model, input_tokens=prompt_tokens,
+        output_tokens=completion_tokens, thinking_tokens=thinking_tokens,
+        cost=entry.cost_usd,
+    )
     analytics_engine.log_event("cost.tracked", {"model": model, "cost": entry.cost_usd, "tokens": entry.usage.total_tokens}, user_id=user_id)
     return {"request_id": entry.request_id, "model": entry.model, "cost_usd": entry.cost_usd,
             "tokens": {"prompt": entry.usage.prompt_tokens, "completion": entry.usage.completion_tokens,
