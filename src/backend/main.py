@@ -768,7 +768,7 @@ async def track_thinking_tokens(
 async def get_token_analytics(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
     # Query per-user token usage from DB to prevent cross-user data leaks
     usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).order_by(TokenUsage.created_at.desc()).limit(100).all()
-    total_cost = sum(u.cost or 0 for u in usages)
+    total_cost = sum(u.cost_usd or 0 for u in usages)
     total_input = sum(u.input_tokens or 0 for u in usages)
     total_output = sum(u.output_tokens or 0 for u in usages)
     total_thinking = sum(u.thinking_tokens or 0 for u in usages)
@@ -778,7 +778,7 @@ async def get_token_analytics(user_id: str = Depends(verify_token), db: Session 
         if m not in by_model:
             by_model[m] = {"requests": 0, "cost": 0, "input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0}
         by_model[m]["requests"] += 1
-        by_model[m]["cost"] += u.cost or 0
+        by_model[m]["cost"] += u.cost_usd or 0
         by_model[m]["input_tokens"] += u.input_tokens or 0
         by_model[m]["output_tokens"] += u.output_tokens or 0
         by_model[m]["thinking_tokens"] += u.thinking_tokens or 0
@@ -1278,7 +1278,7 @@ async def track_llm_cost(
 async def get_cost_summary(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
     # Query per-user cost data from DB to prevent cross-user data leaks
     usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).all()
-    total_cost = sum(u.cost or 0 for u in usages)
+    total_cost = sum(u.cost_usd or 0 for u in usages)
     return {
         "total_cost_usd": round(total_cost, 6),
         "total_requests": len(usages),
@@ -1295,7 +1295,7 @@ async def get_cost_by_model(user_id: str = Depends(verify_token), db: Session = 
         if m not in models:
             models[m] = {"requests": 0, "cost": 0, "input_tokens": 0, "output_tokens": 0}
         models[m]["requests"] += 1
-        models[m]["cost"] += u.cost or 0
+        models[m]["cost"] += u.cost_usd or 0
         models[m]["input_tokens"] += u.input_tokens or 0
         models[m]["output_tokens"] += u.output_tokens or 0
     return {"models": models}
@@ -1304,7 +1304,7 @@ async def get_cost_by_model(user_id: str = Depends(verify_token), db: Session = 
 @app.get("/api/cost-tracker/utilization")
 async def get_cost_utilization(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
     usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).all()
-    total_cost = sum(u.cost or 0 for u in usages)
+    total_cost = sum(u.cost_usd or 0 for u in usages)
     return {"total_cost_usd": round(total_cost, 6), "request_count": len(usages), "user_id": user_id}
 
 
@@ -1315,7 +1315,7 @@ async def get_daily_costs(days: int = 30, user_id: str = Depends(verify_token), 
     daily: Dict[str, float] = {}
     for u in usages:
         day = u.created_at.strftime("%Y-%m-%d") if u.created_at else "unknown"
-        daily[day] = daily.get(day, 0) + (u.cost or 0)
+        daily[day] = daily.get(day, 0) + (u.cost_usd or 0)
     return {"daily": [{"date": k, "cost": round(v, 6)} for k, v in sorted(daily.items())]}
 
 
