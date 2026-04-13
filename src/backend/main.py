@@ -160,7 +160,7 @@ async def login(email: str, password: str):
 
 @app.post("/api/collections/import")
 async def import_postman_collection(file: UploadFile = File(...), user_id: str = Depends(verify_token)):
-    """Import collection (Postman, Bruno, or OpenAPI format)"""
+    """Import collection (Postman, Bruno, or OpenAPI format) with automatic security scan"""
     try:
         # Read file content
         content = await file.read()
@@ -172,6 +172,19 @@ async def import_postman_collection(file: UploadFile = File(...), user_id: str =
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         
+        requests_list = result.get("requests", [])
+        
+        # Market-Ready: Auto-trigger OWASP scan + credential detection on import
+        # The parser's scan methods work on its internal parsed requests,
+        # so we trigger a full parse+scan pipeline and extract findings.
+        owasp_findings = []
+        credential_findings = []
+        if collection_data.get("info"):  # Postman collection format
+            scan_result = postman_parser.parse_collection_data(collection_data)
+            security_scan = scan_result.get("security_scan", {})
+            owasp_findings = security_scan.get("owasp_details", [])
+            credential_findings = security_scan.get("credential_details", [])
+        
         # Store in database with owner_id for ownership checks
         collection_id = str(uuid.uuid4())
         collections_db[collection_id] = {
@@ -179,8 +192,10 @@ async def import_postman_collection(file: UploadFile = File(...), user_id: str =
             "owner_id": user_id,
             "name": result.get("name", "Imported Collection"),
             "format": result.get("format", "unknown"),
-            "requests": result.get("requests", []),
+            "requests": requests_list,
             "total_requests": result.get("total_requests", 0),
+            "owasp_findings": owasp_findings,
+            "credential_findings": credential_findings,
             "created_at": datetime.utcnow().isoformat()
         }
         
@@ -189,7 +204,11 @@ async def import_postman_collection(file: UploadFile = File(...), user_id: str =
             "collection_id": collection_id,
             "format": result.get("format"),
             "total_requests": result.get("total_requests", 0),
-            "name": result.get("name")
+            "name": result.get("name"),
+            "security_scan": {
+                "owasp_findings": len(owasp_findings),
+                "credential_findings": len(credential_findings),
+            },
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Import failed: {str(e)}")
@@ -292,7 +311,7 @@ async def scan_code(code: str, language: str = "python", user_id: str = Depends(
 
 @app.get("/api/risk-score")
 async def get_risk_score(user_id: str = Depends(verify_token)):
-    """Get current unified risk score scoped to the authenticated user"""
+    """Get current unified risk score (Patent 1: security + cost anomaly)"""
     # Build risk score from this user's findings only
     user_engine = RiskScoreEngine()
     for scan in findings_db.values():
@@ -309,7 +328,21 @@ async def get_risk_score(user_id: str = Depends(verify_token)):
                         affected_endpoints=f.get("affected_endpoints", []),
                     )
                 ])
+    
+    # Patent 1: Ingest cost anomalies from enhanced_cost_tracker
+    for anomaly in enhanced_cost_tracker.get_anomalies():
+        user_engine.ingest_cost_anomaly(
+            anomaly_type=anomaly.get("type", "spike"),
+            severity=anomaly.get("severity", "MEDIUM"),
+            model=anomaly.get("model", "unknown"),
+            expected_cost=anomaly.get("expected_cost", 0),
+            actual_cost=anomaly.get("actual_cost", 0),
+            deviation_percentage=anomaly.get("deviation_pct", 0),
+            description=anomaly.get("description", ""),
+        )
+    
     metrics = user_engine.get_metrics()
+    risk_data = user_engine.to_dict()
     
     return {
         "risk_score": metrics.risk_score,
@@ -322,7 +355,10 @@ async def get_risk_score(user_id: str = Depends(verify_token)):
             "low": metrics.low_count,
             "info": metrics.info_count
         },
-        "trends": metrics.trends
+        "trends": metrics.trends,
+        "security_score": risk_data.get("security_score", 0),
+        "cost_anomaly_score": risk_data.get("cost_anomaly_score", 0),
+        "cost_anomalies": risk_data.get("cost_anomalies", 0),
     }
 
 
@@ -391,11 +427,70 @@ async def block_request(request_id: str, reason: str, user_id: str = Depends(ver
 
 @app.get("/api/kill-switch/status")
 async def get_kill_switch_status(user_id: str = Depends(verify_token)):
-    """Get kill switch status (requires authentication)"""
+    """Get kill switch status including budget and loop detection (Patent 3)"""
     return {
         "enabled": kill_switch.is_enabled(),
         "blocked_count": kill_switch.get_blocked_count(),
-        "patterns": kill_switch.get_active_patterns()
+        "patterns": kill_switch.get_active_patterns(),
+        "budget_status": kill_switch.get_budget_status(),
+        "loop_detections": kill_switch.get_loop_detections(),
+        "audit_trail": kill_switch.get_audit_trail()[-10:],
+    }
+
+
+@app.post("/api/kill-switch/budget")
+async def set_kill_switch_budget(
+    budget_limit: float = 100.0,
+    model: Optional[str] = None,
+    model_budget: Optional[float] = None,
+    operation: Optional[str] = None,
+    operation_budget: Optional[float] = None,
+    user_id: str = Depends(verify_token),
+):
+    """Patent 3: Set budget limits for autonomous kill switch"""
+    kill_switch.set_budget(
+        global_limit=budget_limit,
+        model_limits={model: model_budget} if model and model_budget else None,
+        operation_limits={operation: operation_budget} if operation and operation_budget else None,
+    )
+    return {
+        "success": True,
+        "budget_status": kill_switch.get_budget_status(),
+    }
+
+
+@app.post("/api/kill-switch/record-cost")
+async def record_kill_switch_cost(
+    cost: float,
+    model: str,
+    operation: str = "api_call",
+    request_id: Optional[str] = None,
+    user_id: str = Depends(verify_token),
+):
+    """Patent 3: Record cost and trigger auto-kill if budget exceeded"""
+    result = kill_switch.record_cost(cost, model, operation)
+    return result
+
+
+@app.post("/api/kill-switch/record-agent-call")
+async def record_agent_call(
+    agent_id: str,
+    endpoint: str,
+    model: str = "unknown",
+    user_id: str = Depends(verify_token),
+):
+    """Patent 3: Record autonomous agent API call for loop detection"""
+    result = kill_switch.record_agent_call(agent_id, endpoint, model)
+    return result
+
+
+@app.get("/api/kill-switch/audit-trail")
+async def get_kill_audit_trail(user_id: str = Depends(verify_token)):
+    """Patent 3: Get full audit trail of kill events"""
+    return {
+        "audit_trail": kill_switch.get_audit_trail(),
+        "budget_status": kill_switch.get_budget_status(),
+        "loop_detections": kill_switch.get_loop_detections(),
     }
 
 
@@ -405,7 +500,7 @@ async def get_kill_switch_status(user_id: str = Depends(verify_token)):
 
 @app.post("/api/shadow-apis/scan")
 async def scan_shadow_apis(collection_id: str, user_id: str = Depends(verify_token)):
-    """Scan for shadow APIs (requires authentication + ownership)"""
+    """Scan for shadow APIs from collection (requires authentication + ownership)"""
     if collection_id not in collections_db:
         raise HTTPException(status_code=404, detail="Collection not found")
     
@@ -418,8 +513,42 @@ async def scan_shadow_apis(collection_id: str, user_id: str = Depends(verify_tok
         "collection_id": collection_id,
         "shadow_apis": shadow_apis,
         "total_shadow_apis": len(shadow_apis),
-        "risk_impact": len(shadow_apis) * 5  # Each shadow API adds 5 points
+        "risk_impact": shadow_scanner.get_risk_impact(),
     }
+
+
+@app.post("/api/shadow-apis/scan-workspace")
+async def scan_workspace_shadow_apis(
+    workspace_path: str,
+    collection_id: Optional[str] = None,
+    user_id: str = Depends(verify_token),
+):
+    """Scan workspace files for undocumented API endpoints (VS Code integration)"""
+    # Get documented endpoints from collection if provided
+    documented: set = set()
+    if collection_id and collection_id in collections_db:
+        collection = collections_db[collection_id]
+        if collection.get("owner_id") and collection["owner_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        for req in collection.get("requests", []):
+            url = req.get("url", "")
+            if isinstance(url, str) and url:
+                from urllib.parse import urlparse
+                path = urlparse(url).path
+                if path:
+                    documented.add(path)
+    
+    result = shadow_scanner.scan_workspace(workspace_path, documented)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    
+    return result
+
+
+@app.get("/api/shadow-apis/results")
+async def get_shadow_scan_results(user_id: str = Depends(verify_token)):
+    """Get latest shadow API scan results"""
+    return shadow_scanner.to_dict()
 
 
 # ============================================================================
@@ -428,27 +557,42 @@ async def scan_shadow_apis(collection_id: str, user_id: str = Depends(verify_tok
 
 @app.post("/api/compliance/pci-dss")
 async def generate_pci_report(collection_id: str, export_pdf: bool = False, user_id: str = Depends(verify_token)):
-    """Generate PCI DSS compliance report (requires authentication + ownership)"""
+    """Generate PCI DSS v4.0.1 + GDPR compliance report with OWASP mapping"""
     if collection_id not in collections_db:
         raise HTTPException(status_code=404, detail="Collection not found")
     
     collection = collections_db[collection_id]
     if collection.get("owner_id") and collection["owner_id"] != user_id:
         raise HTTPException(status_code=403, detail="Not authorized to access this collection")
-    report = pci_generator.generate_report(collection["requests"], collection["name"])
+    
+    # Market-Ready: Use OWASP + credential findings from import scan
+    owasp_findings = collection.get("owasp_findings", [])
+    credential_findings = collection.get("credential_findings", [])
+    
+    # If no cached findings, run scan now
+    if not owasp_findings:
+        owasp_findings = postman_parser.scan_owasp(collection.get("requests", []))
+    if not credential_findings:
+        credential_findings = postman_parser.detect_credentials(collection.get("requests", []))
+    
+    report = pci_generator.generate_report(
+        requests=collection.get("requests", []),
+        owasp_findings=owasp_findings,
+        credential_findings=credential_findings,
+        organization=collection.get("name", "Unknown"),
+    )
     
     if export_pdf:
-        pdf_path = pdf_generator.generate_compliance_report(report)
-        return {**report, "pdf_url": f"/api/reports/download/{os.path.basename(pdf_path)}"}
+        pdf_content = pci_generator.export_to_pdf(report)
+        # Save PDF and return URL
+        pdf_filename = f"compliance_{report['report_id']}.txt"
+        pdf_path = os.path.join(pdf_generator.output_dir, pdf_filename)
+        os.makedirs(pdf_generator.output_dir, exist_ok=True)
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_content)
+        return {**report, "pdf_url": f"/api/reports/download/{pdf_filename}"}
     
-    return {
-        "report_id": str(uuid.uuid4()),
-        "collection_id": collection_id,
-        "compliance_status": report["summary"]["status"],
-        "compliance_percentage": report["summary"]["compliance_percentage"],
-        "requirements": report["requirements"],
-        "generated_at": datetime.utcnow().isoformat()
-    }
+    return report
 
 
 # ============================================================================
@@ -462,18 +606,19 @@ async def track_thinking_tokens(
     prompt_tokens: int,
     completion_tokens: int,
     thinking_tokens: int,
-    user_id: str = Depends(verify_token)
+    response_time_ms: Optional[float] = None,
+    user_id: str = Depends(verify_token),
 ):
-    """Track thinking tokens for LLM calls (requires authentication)"""
+    """Patent 2: Track thinking tokens with differential analysis + timing"""
     token_data = token_tracker.track_tokens(
         request_id=request_id,
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
-        thinking_tokens=thinking_tokens
+        thinking_tokens=thinking_tokens,
+        response_time_ms=response_time_ms,
     )
 
-    # calculate_cost expects flat token keys; pass the original parameters directly
     cost = token_tracker.calculate_cost({
         "model": model,
         "prompt_tokens": prompt_tokens,
@@ -484,13 +629,16 @@ async def track_thinking_tokens(
     return {
         "request_id": request_id,
         "tokens": token_data["tokens"],
-        "cost": cost
+        "cost": cost,
+        "differential_analysis": token_data.get("differential_analysis"),
+        "timing": token_data.get("timing"),
+        "anomalies": token_data.get("anomalies", []),
     }
 
 
 @app.get("/api/tokens/analytics")
 async def get_token_analytics(user_id: str = Depends(verify_token)):
-    """Get token usage analytics (requires authentication)"""
+    """Patent 2: Get token analytics with differential analysis + anomalies"""
     return token_tracker.get_analytics()
 
 
@@ -1310,6 +1458,11 @@ async def startup_event():
     print("  - Webhook Integration Service (Slack/Discord/Teams)")
     print("  - Enhanced Policy Engine")
     print("  - Scan Session History")
+    print("  - [Patent 1] Unified Risk Score (Security + Cost Anomaly)")
+    print("  - [Patent 2] Thinking Token Differential Analysis")
+    print("  - [Patent 3] Autonomous Kill Switch (Loop + Budget)")
+    print("  - PCI DSS v4.0.1 + GDPR Compliance Engine")
+    print("  - Shadow API Workspace Scanner")
 
 
 @app.on_event("shutdown")

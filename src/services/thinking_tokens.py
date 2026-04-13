@@ -1,40 +1,101 @@
 """
-DevPulse - Thinking Token Attribution System
-Track and attribute LLM reasoning costs
+DevPulse - Thinking Token Attribution System (Market-Ready, Patent 2 Core)
+Intercepts LLM responses, separates reasoning vs completion tokens,
+performs differential cost analysis, and detects thinking-token anomalies.
+
+Patent 2: "Thinking Token Attribution and Differential Cost Analysis"
+Key innovation: Real-time separation of reasoning tokens from completion
+tokens with timing-based attribution and anomaly detection.
 """
 
-from typing import Dict, List, Any
-from datetime import datetime
+import time
+import logging
+from typing import Dict, List, Any, Optional
+from datetime import datetime, timedelta
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 
 class ThinkingTokenTracker:
-    """Track thinking tokens for LLM calls"""
+    """
+    Patent 2 Core: Thinking Token Attribution Engine.
     
-    # OpenAI pricing (as of 2024)
+    Intercepts LLM API responses, separates reasoning (thinking) tokens
+    from completion tokens, attributes costs differentially, and detects
+    anomalous thinking-token usage patterns.
+    """
+    
+    # Model pricing (2025-2026 rates)
     PRICING = {
         "o1": {
-            "prompt": 0.015,  # $0.015 per 1K tokens
-            "completion": 0.060,  # $0.060 per 1K tokens
-            "thinking": 0.150,  # $0.150 per 1K tokens (3x more expensive)
+            "prompt": 0.015,
+            "completion": 0.060,
+            "thinking": 0.150,  # 2.5x completion price
+        },
+        "o1-mini": {
+            "prompt": 0.003,
+            "completion": 0.012,
+            "thinking": 0.030,
+        },
+        "o1-pro": {
+            "prompt": 0.060,
+            "completion": 0.240,
+            "thinking": 0.600,
+        },
+        "o3-mini": {
+            "prompt": 0.0011,
+            "completion": 0.0044,
+            "thinking": 0.011,
         },
         "gpt-4": {
             "prompt": 0.03,
             "completion": 0.06,
-            "thinking": 0.0,  # GPT-4 doesn't have thinking tokens
+            "thinking": 0.0,
+        },
+        "gpt-4o": {
+            "prompt": 0.005,
+            "completion": 0.015,
+            "thinking": 0.0,
+        },
+        "gpt-4o-mini": {
+            "prompt": 0.00015,
+            "completion": 0.0006,
+            "thinking": 0.0,
         },
         "gpt-3.5": {
             "prompt": 0.0005,
             "completion": 0.0015,
             "thinking": 0.0,
-        }
+        },
+        "claude-3.5-sonnet": {
+            "prompt": 0.003,
+            "completion": 0.015,
+            "thinking": 0.0,
+        },
+        "claude-3-opus": {
+            "prompt": 0.015,
+            "completion": 0.075,
+            "thinking": 0.0,
+        },
+        "deepseek-r1": {
+            "prompt": 0.00055,
+            "completion": 0.0022,
+            "thinking": 0.0055,  # R1 has thinking tokens
+        },
     }
+    
+    # Anomaly detection thresholds
+    THINKING_RATIO_ALERT = 5.0  # thinking tokens > 5x completion tokens
+    COST_SPIKE_THRESHOLD = 3.0  # cost > 3x moving average
     
     def __init__(self):
         self.token_records: List[Dict] = []
         self.cost_by_model: Dict[str, float] = defaultdict(float)
         self.cost_by_operation: Dict[str, float] = defaultdict(float)
         self.thinking_tokens_total = 0
+        self.anomalies: List[Dict] = []
+        self._moving_avg_window: List[float] = []
     
     def track_tokens(
         self,
@@ -43,24 +104,22 @@ class ThinkingTokenTracker:
         prompt_tokens: int,
         completion_tokens: int,
         thinking_tokens: int = 0,
-        operation: str = "unknown"
+        operation: str = "unknown",
+        response_time_ms: Optional[float] = None,
+        raw_response: Optional[Dict] = None,
     ) -> Dict:
         """
-        Track token usage for an LLM call
+        Track token usage with Patent 2 differential analysis.
         
-        Args:
-            request_id: Unique request identifier
-            model: Model name (e.g., "o1", "gpt-4")
-            prompt_tokens: Number of prompt tokens
-            completion_tokens: Number of completion tokens
-            thinking_tokens: Number of thinking tokens (o1 only)
-            operation: Operation type (e.g., "vulnerability_analysis")
-            
-        Returns:
-            Token tracking record
+        Intercepts an LLM response, separates reasoning vs completion tokens,
+        performs differential cost attribution, detects anomalies, and logs
+        timing-based signals for thinking-token efficiency analysis.
         """
-        # Get pricing for model
         pricing = self.PRICING.get(model, self.PRICING["gpt-4"])
+        
+        # If raw_response provided, attempt to extract thinking tokens
+        if raw_response and thinking_tokens == 0:
+            thinking_tokens = self._extract_thinking_tokens(raw_response, model)
         
         # Calculate costs
         prompt_cost = (prompt_tokens / 1000) * pricing["prompt"]
@@ -68,7 +127,19 @@ class ThinkingTokenTracker:
         thinking_cost = (thinking_tokens / 1000) * pricing["thinking"]
         total_cost = prompt_cost + completion_cost + thinking_cost
         
-        # Create record
+        # Differential analysis (Patent 2 core)
+        thinking_ratio = (thinking_tokens / completion_tokens) if completion_tokens > 0 else 0
+        thinking_cost_share = (thinking_cost / total_cost * 100) if total_cost > 0 else 0
+        
+        # Timing-based attribution
+        estimated_thinking_time_ms = None
+        tokens_per_second = None
+        if response_time_ms and response_time_ms > 0:
+            total_output = completion_tokens + thinking_tokens
+            tokens_per_second = (total_output / response_time_ms) * 1000
+            if thinking_tokens > 0 and total_output > 0:
+                estimated_thinking_time_ms = response_time_ms * (thinking_tokens / total_output)
+        
         record = {
             "request_id": request_id,
             "model": model,
@@ -77,15 +148,26 @@ class ThinkingTokenTracker:
                 "prompt": prompt_tokens,
                 "completion": completion_tokens,
                 "thinking": thinking_tokens,
-                "total": prompt_tokens + completion_tokens + thinking_tokens
+                "total": prompt_tokens + completion_tokens + thinking_tokens,
             },
             "cost": {
                 "prompt": round(prompt_cost, 6),
                 "completion": round(completion_cost, 6),
                 "thinking": round(thinking_cost, 6),
-                "total": round(total_cost, 6)
+                "total": round(total_cost, 6),
             },
-            "timestamp": datetime.utcnow().isoformat()
+            "differential": {
+                "thinking_ratio": round(thinking_ratio, 2),
+                "thinking_cost_share_pct": round(thinking_cost_share, 1),
+                "cost_without_thinking": round(prompt_cost + completion_cost, 6),
+                "thinking_premium": round(thinking_cost, 6),
+            },
+            "timing": {
+                "response_time_ms": response_time_ms,
+                "estimated_thinking_time_ms": round(estimated_thinking_time_ms, 1) if estimated_thinking_time_ms else None,
+                "tokens_per_second": round(tokens_per_second, 1) if tokens_per_second else None,
+            },
+            "timestamp": datetime.utcnow().isoformat(),
         }
         
         # Store record
@@ -96,7 +178,72 @@ class ThinkingTokenTracker:
         self.cost_by_operation[operation] += total_cost
         self.thinking_tokens_total += thinking_tokens
         
+        # Anomaly detection (Patent 2)
+        self._detect_anomalies(record)
+        
         return record
+    
+    def _extract_thinking_tokens(self, raw_response: Dict, model: str) -> int:
+        """
+        Extract thinking tokens from raw LLM API response.
+        Handles OpenAI o1/o3 format and DeepSeek R1 format.
+        """
+        usage = raw_response.get("usage", {})
+        
+        # OpenAI o1/o3 format
+        completion_details = usage.get("completion_tokens_details", {})
+        reasoning_tokens = completion_details.get("reasoning_tokens", 0)
+        if reasoning_tokens:
+            return reasoning_tokens
+        
+        # DeepSeek R1 format
+        if "reasoning_content" in str(raw_response.get("choices", [{}])):
+            # Estimate from content length (rough heuristic)
+            for choice in raw_response.get("choices", []):
+                message = choice.get("message", {})
+                reasoning = message.get("reasoning_content", "")
+                if reasoning:
+                    return len(reasoning.split()) * 2  # rough token estimate
+        
+        return 0
+    
+    def _detect_anomalies(self, record: Dict) -> None:
+        """Detect thinking-token anomalies (Patent 2 innovation)"""
+        total_cost = record["cost"]["total"]
+        thinking_ratio = record["differential"]["thinking_ratio"]
+        
+        # Update moving average
+        self._moving_avg_window.append(total_cost)
+        if len(self._moving_avg_window) > 20:
+            self._moving_avg_window.pop(0)
+        
+        moving_avg = sum(self._moving_avg_window) / len(self._moving_avg_window) if self._moving_avg_window else 0
+        
+        # Check for excessive thinking ratio
+        if thinking_ratio > self.THINKING_RATIO_ALERT:
+            self.anomalies.append({
+                "type": "excessive_thinking",
+                "request_id": record["request_id"],
+                "model": record["model"],
+                "thinking_ratio": thinking_ratio,
+                "description": f"Thinking tokens {thinking_ratio:.1f}x completion tokens (threshold: {self.THINKING_RATIO_ALERT}x)",
+                "severity": "HIGH",
+                "timestamp": record["timestamp"],
+            })
+        
+        # Check for cost spike
+        if moving_avg > 0 and total_cost > moving_avg * self.COST_SPIKE_THRESHOLD:
+            self.anomalies.append({
+                "type": "cost_spike",
+                "request_id": record["request_id"],
+                "model": record["model"],
+                "cost": total_cost,
+                "moving_average": round(moving_avg, 6),
+                "spike_factor": round(total_cost / moving_avg, 1),
+                "description": f"Cost ${total_cost:.4f} is {total_cost / moving_avg:.1f}x the moving average",
+                "severity": "MEDIUM",
+                "timestamp": record["timestamp"],
+            })
     
     def calculate_cost(self, token_data: Dict) -> Dict:
         """Calculate cost for token data"""
@@ -119,27 +266,37 @@ class ThinkingTokenTracker:
         }
     
     def get_analytics(self) -> Dict:
-        """Get token usage analytics"""
+        """Get token usage analytics with Patent 2 differential insights"""
         total_cost = sum(r["cost"]["total"] for r in self.token_records)
         total_tokens = sum(r["tokens"]["total"] for r in self.token_records)
         
-        # Calculate percentages
         thinking_cost = sum(r["cost"]["thinking"] for r in self.token_records)
         thinking_percentage = (thinking_cost / total_cost * 100) if total_cost > 0 else 0
         
-        # Top operations
+        # Differential analysis aggregates
+        cost_without_thinking = sum(
+            r.get("differential", {}).get("cost_without_thinking", r["cost"]["total"])
+            for r in self.token_records
+        )
+        avg_thinking_ratio = 0.0
+        thinking_records = [r for r in self.token_records if r["tokens"]["thinking"] > 0]
+        if thinking_records:
+            avg_thinking_ratio = sum(
+                r.get("differential", {}).get("thinking_ratio", 0)
+                for r in thinking_records
+            ) / len(thinking_records)
+        
         top_operations = sorted(
             self.cost_by_operation.items(),
             key=lambda x: x[1],
             reverse=True
         )[:5]
         
-        # Model breakdown
         model_breakdown = [
             {
                 "model": model,
                 "cost": round(cost, 2),
-                "percentage": round(cost / total_cost * 100, 1) if total_cost > 0 else 0
+                "percentage": round(cost / total_cost * 100, 1) if total_cost > 0 else 0,
             }
             for model, cost in sorted(
                 self.cost_by_model.items(),
@@ -155,7 +312,20 @@ class ThinkingTokenTracker:
                 "total_requests": len(self.token_records),
                 "thinking_tokens": self.thinking_tokens_total,
                 "thinking_cost": round(thinking_cost, 2),
-                "thinking_percentage": round(thinking_percentage, 1)
+                "thinking_percentage": round(thinking_percentage, 1),
+            },
+            "differential_analysis": {
+                "total_thinking_premium": round(thinking_cost, 2),
+                "cost_without_thinking": round(cost_without_thinking, 2),
+                "avg_thinking_ratio": round(avg_thinking_ratio, 2),
+                "thinking_models_used": len([
+                    m for m, p in self.PRICING.items()
+                    if p["thinking"] > 0 and m in self.cost_by_model
+                ]),
+            },
+            "anomalies": {
+                "total": len(self.anomalies),
+                "recent": self.anomalies[-10:],
             },
             "by_model": model_breakdown,
             "top_operations": [
@@ -163,7 +333,7 @@ class ThinkingTokenTracker:
                 for op, cost in top_operations
             ],
             "cost_per_request": round(total_cost / len(self.token_records), 2) if self.token_records else 0,
-            "cost_per_token": round(total_cost / total_tokens * 1000, 6) if total_tokens > 0 else 0
+            "cost_per_token": round(total_cost / total_tokens * 1000, 6) if total_tokens > 0 else 0,
         }
     
     def get_expensive_operations(self, limit: int = 10) -> List[Dict]:

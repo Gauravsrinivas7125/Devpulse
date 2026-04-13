@@ -1,20 +1,30 @@
 """
-DevPulse - Unified Risk Score Engine
-Aggregates security findings into a single 0-100 risk score
+DevPulse - Unified Risk Score Engine (Market-Ready, Patent 1 Core)
+Combines security vulnerability severity WITH LLM cost anomaly data
+into a single 0-100 unified risk score. This is the core innovation
+of Patent 1: "Unified Security-Cost Risk Scoring for API Ecosystems."
+
+The score formula: R = w_s * SecurityScore + w_c * CostAnomalyScore
+where w_s and w_c are configurable weights (default 0.7 / 0.3).
 """
 
+import math
+import logging
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 
 class SeverityLevel(Enum):
     """Vulnerability severity levels"""
-    CRITICAL = 4  # Weight 4x
-    HIGH = 3      # Weight 3x
-    MEDIUM = 2    # Weight 2x
-    LOW = 1       # Weight 1x
-    INFO = 0      # Weight 0x
+    CRITICAL = 4
+    HIGH = 3
+    MEDIUM = 2
+    LOW = 1
+    INFO = 0
 
 
 @dataclass
@@ -42,21 +52,46 @@ class SecurityFinding:
 
 
 @dataclass
+class CostAnomaly:
+    """Represents an LLM cost anomaly event (Patent 1 integration)"""
+    anomaly_id: str
+    anomaly_type: str  # "spike", "budget_breach", "runaway_loop", "model_drift"
+    severity: str
+    model: str
+    expected_cost: float
+    actual_cost: float
+    deviation_percentage: float
+    timestamp: str
+    description: str
+
+
+@dataclass
 class RiskMetrics:
-    """Risk assessment metrics"""
+    """Risk assessment metrics including cost anomaly data"""
     total_findings: int
     critical_count: int
     high_count: int
     medium_count: int
     low_count: int
     info_count: int
-    risk_score: float  # 0-100
-    risk_level: str    # "CRITICAL", "HIGH", "MEDIUM", "LOW"
-    trends: Dict[str, Any]  # Historical trends
+    risk_score: float  # 0-100 unified score
+    security_score: float  # 0-100 security-only component
+    cost_anomaly_score: float  # 0-100 cost anomaly component
+    risk_level: str  # "CRITICAL", "HIGH", "MEDIUM", "LOW"
+    cost_anomalies: int
+    trends: Dict[str, Any]
 
 
 class RiskScoreEngine:
-    """Calculate unified risk score from security findings"""
+    """
+    Patent 1 Core: Unified Security-Cost Risk Scoring Engine.
+    
+    Combines traditional security vulnerability scoring with LLM cost
+    anomaly signals to produce a single actionable risk score.
+    
+    Formula: R = w_s * S + w_c * C
+    where S = security score, C = cost anomaly score
+    """
     
     # Scoring constants
     CRITICAL_WEIGHT = 25
@@ -71,38 +106,78 @@ class RiskScoreEngine:
     MEDIUM_THRESHOLD = 40
     LOW_THRESHOLD = 20
     
+    # Patent 1: Security vs Cost weighting (configurable)
+    SECURITY_WEIGHT = 0.7
+    COST_WEIGHT = 0.3
+    
+    # Cost anomaly scoring
+    COST_ANOMALY_WEIGHTS = {
+        "spike": 15,
+        "budget_breach": 25,
+        "runaway_loop": 30,
+        "model_drift": 10,
+    }
+    
     def __init__(self):
         self.findings: List[SecurityFinding] = []
+        self.cost_anomalies: List[CostAnomaly] = []
         self.historical_scores: List[float] = []
+        self._security_score_cache: Optional[float] = None
+        self._cost_score_cache: Optional[float] = None
     
     def add_finding(self, finding: SecurityFinding) -> None:
         """Add a security finding"""
         self.findings.append(finding)
+        self._security_score_cache = None
     
     def add_findings(self, findings: List[SecurityFinding]) -> None:
         """Add multiple security findings"""
         self.findings.extend(findings)
+        self._security_score_cache = None
     
-    def calculate_score(self) -> float:
-        """
-        Calculate unified risk score (0-100)
+    def add_cost_anomaly(self, anomaly: CostAnomaly) -> None:
+        """Add an LLM cost anomaly signal (Patent 1)"""
+        self.cost_anomalies.append(anomaly)
+        self._cost_score_cache = None
+    
+    def add_cost_anomalies(self, anomalies: List[CostAnomaly]) -> None:
+        """Add multiple cost anomaly signals"""
+        self.cost_anomalies.extend(anomalies)
+        self._cost_score_cache = None
+    
+    def ingest_cost_anomaly(
+        self,
+        anomaly_id: str,
+        anomaly_type: str,
+        model: str,
+        expected_cost: float,
+        actual_cost: float,
+        description: str = "",
+    ) -> CostAnomaly:
+        """Convenience method to create and ingest a cost anomaly"""
+        deviation = ((actual_cost - expected_cost) / expected_cost * 100) if expected_cost > 0 else 0
+        severity = "CRITICAL" if deviation > 500 else "HIGH" if deviation > 200 else "MEDIUM" if deviation > 100 else "LOW"
         
-        Algorithm:
-        1. Count findings by severity
-        2. Apply weights to each severity level
-        3. Normalize to 0-100 scale
-        4. Apply diminishing returns (logarithmic scaling)
-        
-        Returns:
-            Risk score from 0-100
-        """
+        anomaly = CostAnomaly(
+            anomaly_id=anomaly_id,
+            anomaly_type=anomaly_type,
+            severity=severity,
+            model=model,
+            expected_cost=expected_cost,
+            actual_cost=actual_cost,
+            deviation_percentage=round(deviation, 1),
+            timestamp=datetime.utcnow().isoformat(),
+            description=description or f"{anomaly_type}: {model} cost ${actual_cost:.2f} vs expected ${expected_cost:.2f}",
+        )
+        self.add_cost_anomaly(anomaly)
+        return anomaly
+    
+    def _calculate_security_score(self) -> float:
+        """Calculate security-only score (0-100)"""
         if not self.findings:
             return 0.0
         
-        # Count findings by severity
         severity_counts = self._count_by_severity()
-        
-        # Calculate weighted score
         weighted_score = (
             severity_counts["CRITICAL"] * self.CRITICAL_WEIGHT +
             severity_counts["HIGH"] * self.HIGH_WEIGHT +
@@ -111,19 +186,57 @@ class RiskScoreEngine:
             severity_counts["INFO"] * self.INFO_WEIGHT
         )
         
-        # Normalize to 0-100 scale with diminishing returns
-        # Using logarithmic scaling to prevent score inflation
         max_possible_score = len(self.findings) * self.CRITICAL_WEIGHT
         normalized_score = (weighted_score / max_possible_score) * 100
+        score = min(100, normalized_score * (1 + 0.1 * len(self.findings) ** 0.5))
+        return round(score, 1)
+    
+    def _calculate_cost_anomaly_score(self) -> float:
+        """Calculate cost anomaly score (0-100) - Patent 1 innovation"""
+        if not self.cost_anomalies:
+            return 0.0
         
-        # Apply diminishing returns (logarithmic scaling)
-        # This prevents a single critical issue from maxing out the score
-        risk_score = min(100, normalized_score * (1 + 0.1 * len(self.findings) ** 0.5))
+        weighted_score = 0.0
+        for anomaly in self.cost_anomalies:
+            base_weight = self.COST_ANOMALY_WEIGHTS.get(anomaly.anomaly_type, 10)
+            # Scale by deviation magnitude (log scale to prevent extreme inflation)
+            deviation_factor = 1 + math.log1p(abs(anomaly.deviation_percentage) / 100)
+            weighted_score += base_weight * deviation_factor
         
-        # Store historical score
+        # Normalize with diminishing returns
+        score = min(100, weighted_score * (1 + 0.05 * len(self.cost_anomalies) ** 0.5))
+        return round(score, 1)
+    
+    def calculate_score(self) -> float:
+        """
+        Calculate UNIFIED risk score (0-100) - Patent 1 Core Algorithm
+        
+        R = w_s * SecurityScore + w_c * CostAnomalyScore
+        
+        This is the core patent innovation: a single score that combines
+        security vulnerability severity with LLM cost anomaly data.
+        """
+        security_score = self._calculate_security_score()
+        cost_score = self._calculate_cost_anomaly_score()
+        
+        # If we only have one signal type, that signal gets full weight
+        if not self.findings and not self.cost_anomalies:
+            return 0.0
+        elif not self.findings:
+            unified = cost_score
+        elif not self.cost_anomalies:
+            unified = security_score
+        else:
+            unified = (
+                self.SECURITY_WEIGHT * security_score +
+                self.COST_WEIGHT * cost_score
+            )
+        
+        risk_score = round(min(100, unified), 1)
         self.historical_scores.append(risk_score)
-        
-        return round(risk_score, 1)
+        self._security_score_cache = security_score
+        self._cost_score_cache = cost_score
+        return risk_score
     
     def get_risk_level(self, score: float) -> str:
         """Convert numeric score to risk level"""
@@ -139,11 +252,10 @@ class RiskScoreEngine:
             return "INFO"
     
     def get_metrics(self) -> RiskMetrics:
-        """Get comprehensive risk metrics"""
+        """Get comprehensive risk metrics including cost anomaly data"""
         severity_counts = self._count_by_severity()
         risk_score = self.calculate_score()
         risk_level = self.get_risk_level(risk_score)
-        
         trends = self._calculate_trends()
         
         return RiskMetrics(
@@ -154,8 +266,11 @@ class RiskScoreEngine:
             low_count=severity_counts["LOW"],
             info_count=severity_counts["INFO"],
             risk_score=risk_score,
+            security_score=self._security_score_cache or 0.0,
+            cost_anomaly_score=self._cost_score_cache or 0.0,
             risk_level=risk_level,
-            trends=trends
+            cost_anomalies=len(self.cost_anomalies),
+            trends=trends,
         )
     
     def _count_by_severity(self) -> Dict[str, int]:
@@ -232,7 +347,7 @@ class RiskScoreEngine:
         return dict(sorted(endpoints.items(), key=lambda x: x[1], reverse=True))
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert metrics to dictionary"""
+        """Convert metrics to dictionary (includes Patent 1 unified score)"""
         metrics = self.get_metrics()
         return {
             "total_findings": metrics.total_findings,
@@ -241,99 +356,33 @@ class RiskScoreEngine:
                 "high": metrics.high_count,
                 "medium": metrics.medium_count,
                 "low": metrics.low_count,
-                "info": metrics.info_count
+                "info": metrics.info_count,
             },
             "risk_score": metrics.risk_score,
+            "security_score": metrics.security_score,
+            "cost_anomaly_score": metrics.cost_anomaly_score,
             "risk_level": metrics.risk_level,
+            "cost_anomalies": metrics.cost_anomalies,
             "top_findings": [
                 {
                     "title": f.title,
                     "severity": f.severity,
                     "category": f.category,
-                    "affected_endpoints": f.affected_endpoints
+                    "affected_endpoints": f.affected_endpoints,
                 }
                 for f in self.get_top_findings(5)
             ],
+            "cost_anomaly_details": [
+                {
+                    "anomaly_id": a.anomaly_id,
+                    "type": a.anomaly_type,
+                    "severity": a.severity,
+                    "model": a.model,
+                    "deviation": a.deviation_percentage,
+                    "description": a.description,
+                }
+                for a in self.cost_anomalies[-10:]
+            ],
             "affected_endpoints": self.get_affected_endpoints(),
-            "trends": metrics.trends
+            "trends": metrics.trends,
         }
-
-
-# Example usage
-if __name__ == "__main__":
-    # Create engine
-    engine = RiskScoreEngine()
-    
-    # Add sample findings
-    findings = [
-        SecurityFinding(
-            id="vuln_001",
-            title="SQL Injection in /api/users",
-            severity="CRITICAL",
-            category="OWASP",
-            description="User input not sanitized in SQL query",
-            remediation="Use parameterized queries",
-            affected_endpoints=["/api/users", "/api/users/{id}"]
-        ),
-        SecurityFinding(
-            id="vuln_002",
-            title="Missing Authentication on /api/admin",
-            severity="CRITICAL",
-            category="Auth",
-            description="Admin endpoint accessible without authentication",
-            remediation="Add JWT authentication middleware",
-            affected_endpoints=["/api/admin"]
-        ),
-        SecurityFinding(
-            id="vuln_003",
-            title="Weak Password Policy",
-            severity="HIGH",
-            category="Auth",
-            description="Passwords not enforced to be strong",
-            remediation="Implement password strength requirements",
-            affected_endpoints=["/api/auth/register"]
-        ),
-        SecurityFinding(
-            id="vuln_004",
-            title="Missing HTTPS",
-            severity="HIGH",
-            category="Encryption",
-            description="API endpoints not using HTTPS",
-            remediation="Enable HTTPS on all endpoints",
-            affected_endpoints=["*"]
-        ),
-        SecurityFinding(
-            id="vuln_005",
-            title="Verbose Error Messages",
-            severity="MEDIUM",
-            category="Information Disclosure",
-            description="Error messages reveal internal system details",
-            remediation="Use generic error messages in production",
-            affected_endpoints=["*"]
-        ),
-    ]
-    
-    engine.add_findings(findings)
-    
-    # Get metrics
-    metrics = engine.get_metrics()
-    print(f"Risk Score: {metrics.risk_score}/100")
-    print(f"Risk Level: {metrics.risk_level}")
-    print(f"Total Findings: {metrics.total_findings}")
-    print(f"  Critical: {metrics.critical_count}")
-    print(f"  High: {metrics.high_count}")
-    print(f"  Medium: {metrics.medium_count}")
-    print(f"  Low: {metrics.low_count}")
-    print(f"  Info: {metrics.info_count}")
-    
-    print("\nTop Findings:")
-    for finding in engine.get_top_findings(3):
-        print(f"  [{finding.severity}] {finding.title}")
-    
-    print("\nAffected Endpoints:")
-    for endpoint, count in engine.get_affected_endpoints().items():
-        print(f"  {endpoint}: {count} findings")
-    
-    print("\nFull Metrics:")
-    import json
-    print(json.dumps(engine.to_dict(), indent=2))

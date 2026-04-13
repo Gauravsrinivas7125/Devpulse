@@ -188,6 +188,75 @@ export class DevPulseAPIClient {
   }
 
   /**
+   * Scan workspace for shadow APIs
+   */
+  async scanWorkspaceShadowAPIs(workspacePath: string, collectionId?: string): Promise<any> {
+    if (!this.authToken) {
+      throw new Error('Not authenticated');
+    }
+
+    try {
+      const params: Record<string, string> = { workspace_path: workspacePath };
+      if (collectionId) {
+        params.collection_id = collectionId;
+      }
+      const response = await axios.post(
+        `${this.apiBaseUrl}/api/shadow-apis/scan-workspace`,
+        null,
+        {
+          headers: { Authorization: `Bearer ${this.authToken}` },
+          params,
+        }
+      );
+      return response.data;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Set budget limit for kill switch (Patent 3)
+   */
+  async setBudget(budgetLimit: number): Promise<any> {
+    if (!this.authToken) {
+      throw new Error('Not authenticated');
+    }
+
+    try {
+      const response = await axios.post(
+        `${this.apiBaseUrl}/api/kill-switch/budget`,
+        null,
+        {
+          headers: { Authorization: `Bearer ${this.authToken}` },
+          params: { budget_limit: budgetLimit },
+        }
+      );
+      return response.data;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get kill switch audit trail (Patent 3)
+   */
+  async getAuditTrail(): Promise<any> {
+    if (!this.authToken) {
+      throw new Error('Not authenticated');
+    }
+
+    try {
+      const response = await axios.get(
+        `${this.apiBaseUrl}/api/kill-switch/audit-trail`,
+        { headers: { Authorization: `Bearer ${this.authToken}` } }
+      );
+      return response.data;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
    * Handle API errors
    */
   private handleError(error: any): Error {

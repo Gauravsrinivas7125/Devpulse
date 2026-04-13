@@ -1,9 +1,10 @@
 /**
- * DevPulse - Metrics & Security Dashboards
+ * DevPulse - Metrics & Security Dashboards (Market-Ready)
  * Comprehensive analytics and security monitoring
+ * Connected to live API data with Patent intelligence features
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 
 interface SecurityMetric {
   severity: 'critical' | 'high' | 'medium' | 'low';
@@ -18,11 +19,72 @@ interface DashboardData {
   teamMembers: number;
   scansDone: number;
   complianceScore: number;
+  securityScore: number;
+  costAnomalyScore: number;
+  costAnomalies: number;
   metrics: {
     byType: { [key: string]: number };
     bySeverity: SecurityMetric[];
     trends: { date: string; score: number }[];
   };
+}
+
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+async function fetchAPI(path: string, token: string) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`API ${path} failed: ${res.status}`);
+  return res.json();
+}
+
+/** Hook: load dashboard data from live API */
+function useLiveDashboard(token: string | null): { data: DashboardData; loading: boolean } {
+  const [data, setData] = useState<DashboardData>(sampleDashboardData);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!token) return;
+    setLoading(true);
+    try {
+      const [risk, findings, status, analytics] = await Promise.all([
+        fetchAPI('/api/risk-score', token),
+        fetchAPI('/api/findings', token),
+        fetchAPI('/api/status', token),
+        fetchAPI('/api/analytics/comprehensive', token).catch(() => null),
+      ]);
+
+      setData((prev) => ({
+        ...prev,
+        riskScore: risk.risk_score ?? prev.riskScore,
+        totalFindings: risk.total_findings ?? findings.total ?? prev.totalFindings,
+        apisCovered: status.collections ?? prev.apisCovered,
+        scansDone: status.total_scans ?? prev.scansDone,
+        securityScore: risk.security_score ?? 0,
+        costAnomalyScore: risk.cost_anomaly_score ?? 0,
+        costAnomalies: risk.cost_anomalies ?? 0,
+        metrics: {
+          ...prev.metrics,
+          bySeverity: [
+            { severity: 'critical', count: risk.by_severity?.critical ?? 0, trend: 0 },
+            { severity: 'high', count: risk.by_severity?.high ?? 0, trend: 0 },
+            { severity: 'medium', count: risk.by_severity?.medium ?? 0, trend: 0 },
+            { severity: 'low', count: risk.by_severity?.low ?? 0, trend: 0 },
+          ],
+          trends: analytics?.risk_trend ?? prev.metrics.trends,
+        },
+      }));
+    } catch (err) {
+      console.error('Dashboard fetch error:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  return { data, loading };
 }
 
 export const MetricsDashboard: React.FC<{ data: DashboardData }> = ({ data }) => {
@@ -35,17 +97,17 @@ export const MetricsDashboard: React.FC<{ data: DashboardData }> = ({ data }) =>
 
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
         <MetricCard
-          title="Risk Score"
+          title="Unified Risk Score"
           value={data.riskScore}
           unit="/100"
-          trend={data.metrics.bySeverity.reduce((a, b) => a + b.trend, 0) / data.metrics.bySeverity.length}
+          trend={data.metrics.bySeverity.reduce((a, b) => a + b.trend, 0) / Math.max(data.metrics.bySeverity.length, 1)}
           icon="Risk"
           color="bg-red-50"
         />
         <MetricCard title="Total Findings" value={data.totalFindings} trend={-5} icon="Findings" color="bg-yellow-50" />
         <MetricCard title="APIs Covered" value={data.apisCovered} trend={12} icon="APIs" color="bg-blue-50" />
-        <MetricCard title="Team Members" value={data.teamMembers} trend={3} icon="Team" color="bg-green-50" />
-        <MetricCard title="Scans Completed" value={data.scansDone} trend={25} icon="Scans" color="bg-purple-50" />
+        <MetricCard title="Security Score" value={data.securityScore} unit="/100" trend={0} icon="Security" color="bg-orange-50" />
+        <MetricCard title="Cost Anomaly Score" value={data.costAnomalyScore} unit="/100" trend={0} icon="Cost" color="bg-purple-50" />
         <MetricCard title="Compliance Score" value={data.complianceScore} unit="%" trend={8} icon="Compliance" color="bg-indigo-50" />
       </div>
 
@@ -136,6 +198,9 @@ const sampleDashboardData: DashboardData = {
   teamMembers: 7,
   scansDone: 124,
   complianceScore: 88,
+  securityScore: 0,
+  costAnomalyScore: 0,
+  costAnomalies: 0,
   metrics: {
     byType: {
       Authentication: 12,
@@ -347,11 +412,18 @@ const SecurityTimeline: React.FC = () => (
   </div>
 );
 
-const DashboardPage: React.FC = () => (
-  <div className="space-y-10 py-6">
-    <MetricsDashboard data={sampleDashboardData} />
-    <SecurityDashboard data={sampleDashboardData} />
-  </div>
-);
+const DashboardPage: React.FC<{ token?: string | null }> = ({ token = null }) => {
+  const { data, loading } = useLiveDashboard(token);
+
+  return (
+    <div className="space-y-10 py-6">
+      {loading && (
+        <div className="text-center text-gray-500">Loading live data...</div>
+      )}
+      <MetricsDashboard data={data} />
+      <SecurityDashboard data={data} />
+    </div>
+  );
+};
 
 export default DashboardPage;
