@@ -3,27 +3,51 @@ DevPulse - Admin API Endpoints
 Endpoints for the admin dashboard to fetch metrics and system data
 """
 
+import os
 import logging
 from typing import Dict, Any, List
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
+import jwt
 
 from .models import User, Collection, Scan, AuditLog
 from .database import get_db
+from .auth_service_db import SECRET_KEY, ALGORITHM
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
+_security = HTTPBearer()
+_JWT_SECRET = os.getenv("SECRET_KEY", SECRET_KEY)
+_JWT_ALGORITHM = ALGORITHM
+
 
 async def verify_admin(
-    current_user: User = Depends(lambda: None),
+    credentials=Depends(_security),
     db: Session = Depends(get_db)
 ) -> User:
-    """Verify user is admin"""
-    if not current_user or current_user.plan != "enterprise":
+    """Verify user is admin (enterprise plan required)"""
+    token = credentials.credentials
+    user_id = None
+    # Try JWT first
+    try:
+        payload = jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+        user_id = payload.get("sub")
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+        pass
+    # Fallback to legacy token
+    if not user_id and token and token.startswith("token_"):
+        user_id = token.replace("token_", "")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    current_user = db.query(User).filter(User.id == user_id).first()
+    if not current_user:
+        raise HTTPException(status_code=401, detail="User not found")
+    if current_user.plan not in ("enterprise", "admin"):
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
 

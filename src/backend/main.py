@@ -35,7 +35,7 @@ from sqlalchemy import func
 from .trpc_router import trpc
 from .billing_endpoints import router as billing_router
 from .admin_endpoints import router as admin_router
-from .team_endpoints import router as team_router
+# team_endpoints router not included — main.py has its own properly-authenticated team endpoints
 from .stripe_webhook_handler import get_webhook_handler
 from .plan_enforcement import get_plan_enforcer, PlanLimits
 from .csrf_protection import CSRFTokenManager, CSRFMiddleware
@@ -95,7 +95,7 @@ app.add_middleware(
 app.include_router(trpc.get_fastapi_router())
 app.include_router(billing_router)
 app.include_router(admin_router)
-app.include_router(team_router)
+# team_router removed: main.py already defines properly-authenticated team endpoints below
 
 postman_parser = PostmanParser()
 risk_engine = RiskScoreEngine()
@@ -178,7 +178,7 @@ async def rate_limit_middleware(request: Request, call_next):
     rate_key = f"{client_key}:{current_minute}"
     count = redis_client.incr(rate_key)
     if count == 1:
-        redis_client.set(rate_key, "1", ex=120)
+        redis_client.expire(rate_key, 120)
     if count > RATE_LIMIT_RPM:
         return JSONResponse(
             status_code=429,
@@ -932,9 +932,24 @@ async def create_portal_session(req: PortalRequest, user_id: str = Depends(verif
 
 @app.post("/api/billing/link-customer")
 async def link_stripe_customer(stripe_customer_id: str, user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    import stripe as stripe_lib
+    STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    # Verify the Stripe customer belongs to this user by checking email match
+    if STRIPE_SECRET_KEY:
+        stripe_lib.api_key = STRIPE_SECRET_KEY
+        try:
+            customer = stripe_lib.Customer.retrieve(stripe_customer_id)
+            if customer.get("email") != user.email:
+                raise HTTPException(status_code=403, detail="Stripe customer email does not match your account.")
+        except stripe_lib.error.InvalidRequestError:
+            raise HTTPException(status_code=400, detail="Invalid Stripe customer ID.")
+    # Ensure no other user has already claimed this customer ID
+    existing = db.query(User).filter(User.stripe_customer_id == stripe_customer_id, User.id != user_id).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="This Stripe customer is already linked to another account.")
     user.stripe_customer_id = stripe_customer_id
     db.commit()
     crud.log_audit_event(db, action="billing.customer_linked", resource_type="user", user_id=user_id)

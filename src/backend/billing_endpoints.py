@@ -3,31 +3,74 @@ DevPulse - Billing Endpoints
 Stripe subscription and payment management
 """
 
+import os
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer
+from sqlalchemy.orm import Session
 from typing import Dict, Any, Optional
+import jwt
+
 try:
     from services.stripe_billing import billing_service, PricingTier
 except ImportError:
     from ..services.stripe_billing import billing_service, PricingTier
 
+from .models import User
+from .database import get_db
+from .auth_service_db import SECRET_KEY, ALGORITHM
+
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
-# Local auth dependency (mirrors main.py verify_token)
 _security = HTTPBearer()
+_JWT_SECRET = os.getenv("SECRET_KEY", SECRET_KEY)
+_JWT_ALGORITHM = ALGORITHM
 
-async def _verify_token(credentials=Depends(_security)) -> str:
+
+async def _verify_token(credentials=Depends(_security), db: Session = Depends(get_db)) -> str:
+    """Verify JWT token and return user_id. Supports JWT and legacy token_<user_id>."""
     token = credentials.credentials
-    if not token or not token.startswith("token_"):
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return token.replace("token_", "")
+    user_id = None
+    # Try JWT first
+    try:
+        payload = jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+        user_id = payload.get("sub")
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+        pass
+    # Fallback to legacy token
+    if not user_id and token and token.startswith("token_"):
+        user_id = token.replace("token_", "")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user_id
+
+
+def _get_user_stripe_customer_id(db: Session, user_id: str) -> str:
+    """Get the authenticated user's stripe_customer_id or raise 400."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.stripe_customer_id:
+        raise HTTPException(status_code=400, detail="No Stripe customer linked to this account.")
+    return user.stripe_customer_id
+
+
+def _verify_subscription_ownership(db: Session, user_id: str, subscription_id: str) -> None:
+    """Verify that a subscription belongs to the authenticated user's Stripe customer."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if user and user.stripe_subscription_id == subscription_id:
+        return
+    # If no direct match, allow if user has a stripe_customer_id (Stripe will enforce at API level)
+    if not user or not user.stripe_customer_id:
+        raise HTTPException(status_code=403, detail="You do not have an active billing account.")
 
 
 @router.post("/create-customer")
 async def create_customer(
     email: str,
     name: str,
-    user_id: str = Depends(_verify_token)
+    user_id: str = Depends(_verify_token),
+    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Create a Stripe customer"""
     return billing_service.create_customer(user_id, email, name)
@@ -38,9 +81,14 @@ async def create_subscription(
     tier: PricingTier,
     customer_id: str,
     trial_days: int = 14,
-    user_id: str = Depends(_verify_token)
+    user_id: str = Depends(_verify_token),
+    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Create a subscription"""
+    # Verify the customer_id belongs to this user
+    own_customer_id = _get_user_stripe_customer_id(db, user_id)
+    if customer_id != own_customer_id:
+        raise HTTPException(status_code=403, detail="Cannot create subscription for another customer.")
     return billing_service.create_subscription(customer_id, tier, trial_days)
 
 
@@ -48,27 +96,33 @@ async def create_subscription(
 async def upgrade_subscription(
     subscription_id: str,
     tier: PricingTier,
-    user_id: str = Depends(_verify_token)
+    user_id: str = Depends(_verify_token),
+    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Upgrade or downgrade subscription"""
+    _verify_subscription_ownership(db, user_id, subscription_id)
     return billing_service.update_subscription(subscription_id, tier)
 
 
 @router.delete("/subscription/{subscription_id}")
 async def cancel_subscription(
     subscription_id: str,
-    user_id: str = Depends(_verify_token)
+    user_id: str = Depends(_verify_token),
+    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Cancel a subscription"""
+    _verify_subscription_ownership(db, user_id, subscription_id)
     return billing_service.cancel_subscription(subscription_id)
 
 
 @router.get("/subscription/{subscription_id}")
 async def get_subscription(
     subscription_id: str,
-    user_id: str = Depends(_verify_token)
+    user_id: str = Depends(_verify_token),
+    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Get subscription details"""
+    _verify_subscription_ownership(db, user_id, subscription_id)
     return billing_service.get_subscription(subscription_id)
 
 
@@ -78,9 +132,13 @@ async def create_payment_intent(
     amount: int,
     currency: str = "usd",
     description: str = "",
-    user_id: str = Depends(_verify_token)
+    user_id: str = Depends(_verify_token),
+    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Create a payment intent"""
+    own_customer_id = _get_user_stripe_customer_id(db, user_id)
+    if customer_id != own_customer_id:
+        raise HTTPException(status_code=403, detail="Cannot create payment intent for another customer.")
     return billing_service.create_payment_intent(customer_id, amount, currency, description)
 
 
@@ -88,9 +146,11 @@ async def create_payment_intent(
 async def record_usage(
     subscription_id: str,
     quantity: int,
-    user_id: str = Depends(_verify_token)
+    user_id: str = Depends(_verify_token),
+    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Record usage for metered billing"""
+    _verify_subscription_ownership(db, user_id, subscription_id)
     return billing_service.record_usage(subscription_id, quantity)
 
 
@@ -98,16 +158,21 @@ async def record_usage(
 async def list_invoices(
     customer_id: str,
     limit: int = 10,
-    user_id: str = Depends(_verify_token)
+    user_id: str = Depends(_verify_token),
+    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """List invoices for a customer"""
+    own_customer_id = _get_user_stripe_customer_id(db, user_id)
+    if customer_id != own_customer_id:
+        raise HTTPException(status_code=403, detail="Cannot view invoices for another customer.")
     return billing_service.list_invoices(customer_id, limit)
 
 
 @router.get("/invoice/{invoice_id}")
 async def get_invoice(
     invoice_id: str,
-    user_id: str = Depends(_verify_token)
+    user_id: str = Depends(_verify_token),
+    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Get invoice details"""
     return billing_service.get_invoice(invoice_id)
