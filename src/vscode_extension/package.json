@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anugownori/pulse-dashboard"
+    "url": "https://github.com/darshanbharathwajnhcm-del/Devpulse"
   },
   "engines": {
     "vscode": "^1.85.0"
@@ -81,6 +81,21 @@
         "command": "devpulse.killSwitch",
         "title": "DevPulse: Activate Kill Switch",
         "icon": "$(stop)"
+      },
+      {
+        "command": "devpulse.scanShadowAPIs",
+        "title": "DevPulse: Scan Workspace for Shadow APIs",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "devpulse.setBudget",
+        "title": "DevPulse: Set Kill Switch Budget",
+        "icon": "$(credit-card)"
+      },
+      {
+        "command": "devpulse.viewAuditTrail",
+        "title": "DevPulse: View Kill Switch Audit Trail",
+        "icon": "$(list-ordered)"
       }
     ],
     "menus": {
@@ -127,9 +142,12 @@
     "package": "vsce package",
     "publish": "vsce publish"
   },
-  "devDependencies": {
-    "@types/vscode": "^1.85.0",
-    "@vscode/vsce": "^2.22.0",
-    "typescript": "^5.3.0"
-  }
+    "dependencies": {
+      "axios": "^1.6.0"
+    },
+    "devDependencies": {
+      "@types/vscode": "^1.85.0",
+      "@vscode/vsce": "^2.22.0",
+      "typescript": "^5.3.0"
+    }
 }
