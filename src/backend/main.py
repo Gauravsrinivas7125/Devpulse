@@ -253,6 +253,8 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not pwd_context.verify(password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    if not user.email_verified:
+        raise HTTPException(status_code=403, detail="Please verify your email first")
     user.last_login = datetime.utcnow()
     db.commit()
     access_token = _create_access_token(user.id, user.email)
@@ -803,7 +805,7 @@ class WebSocketManager:
                 user_id = payload.get("sub")
             except (jwt.InvalidTokenError, jwt.ExpiredSignatureError):
                 pass
-            if not user_id and token and token.startswith("token_"):
+            if not user_id and os.getenv("ENVIRONMENT", "production") == "development" and token and token.startswith("token_"):
                 user_id = token.replace("token_", "")
             if not user_id:
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -1273,28 +1275,55 @@ async def track_llm_cost(
 
 
 @app.get("/api/cost-tracker/summary")
-async def get_cost_summary(user_id: str = Depends(verify_token)):
-    return enhanced_cost_tracker.get_summary()
+async def get_cost_summary(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    # Query per-user cost data from DB to prevent cross-user data leaks
+    usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).all()
+    total_cost = sum(u.cost or 0 for u in usages)
+    return {
+        "total_cost_usd": round(total_cost, 6),
+        "total_requests": len(usages),
+        "user_id": user_id,
+    }
 
 
 @app.get("/api/cost-tracker/models")
-async def get_cost_by_model(user_id: str = Depends(verify_token)):
-    return {"models": enhanced_cost_tracker.get_model_breakdown()}
+async def get_cost_by_model(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).all()
+    models: Dict[str, Any] = {}
+    for u in usages:
+        m = u.model or "unknown"
+        if m not in models:
+            models[m] = {"requests": 0, "cost": 0, "input_tokens": 0, "output_tokens": 0}
+        models[m]["requests"] += 1
+        models[m]["cost"] += u.cost or 0
+        models[m]["input_tokens"] += u.input_tokens or 0
+        models[m]["output_tokens"] += u.output_tokens or 0
+    return {"models": models}
 
 
 @app.get("/api/cost-tracker/utilization")
-async def get_cost_utilization(user_id: str = Depends(verify_token)):
-    return enhanced_cost_tracker.get_utilization()
+async def get_cost_utilization(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).all()
+    total_cost = sum(u.cost or 0 for u in usages)
+    return {"total_cost_usd": round(total_cost, 6), "request_count": len(usages), "user_id": user_id}
 
 
 @app.get("/api/cost-tracker/daily")
-async def get_daily_costs(days: int = 30, user_id: str = Depends(verify_token)):
-    return {"daily": enhanced_cost_tracker.get_daily_breakdown(days)}
+async def get_daily_costs(days: int = 30, user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id, TokenUsage.created_at >= cutoff).all()
+    daily: Dict[str, float] = {}
+    for u in usages:
+        day = u.created_at.strftime("%Y-%m-%d") if u.created_at else "unknown"
+        daily[day] = daily.get(day, 0) + (u.cost or 0)
+    return {"daily": [{"date": k, "cost": round(v, 6)} for k, v in sorted(daily.items())]}
 
 
 @app.get("/api/cost-tracker/anomalies")
-async def get_cost_anomalies(user_id: str = Depends(verify_token)):
-    return {"anomalies": enhanced_cost_tracker.get_anomalies()}
+async def get_cost_anomalies(user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    # Return empty anomalies list — anomaly detection requires user-scoped data
+    usages = db.query(TokenUsage).filter(TokenUsage.user_id == user_id).all()
+    return {"anomalies": [], "total_tracked": len(usages)}
 
 
 @app.post("/api/cost-tracker/budget")
@@ -1483,6 +1512,10 @@ async def get_scan_session(session_id: str, user_id: str = Depends(verify_token)
 
 @app.post("/api/scan-sessions/{session_id}/notes")
 async def add_scan_note(session_id: str, note: str, user_id: str = Depends(verify_token)):
+    # Verify ownership before allowing note addition
+    session = scan_session_history.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
     if not scan_session_history.add_note(session_id, note):
         raise HTTPException(status_code=404, detail="Session not found")
     return {"success": True}
