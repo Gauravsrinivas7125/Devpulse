@@ -214,6 +214,24 @@ class RedisClient:
             logger.error(f"Redis HGETALL error: {str(e)}")
             return {}
 
+    def expire(self, key: str, seconds: int) -> bool:
+        """Set expiration on a key (seconds)"""
+        try:
+            if self.use_redis and self.client:
+                return bool(self.client.expire(key, seconds))
+            else:
+                # In-memory fallback: schedule key deletion via threading
+                import threading
+                def _expire_key():
+                    self._memory_store.pop(key, None)
+                timer = threading.Timer(seconds, _expire_key)
+                timer.daemon = True
+                timer.start()
+                return True
+        except Exception as e:
+            logger.error(f"Redis EXPIRE error: {str(e)}")
+            return False
+
     def setjson(self, key: str, obj: Any, ex: Optional[int] = None) -> bool:
         """Set JSON object"""
         try:

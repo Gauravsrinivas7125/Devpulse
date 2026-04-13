@@ -192,11 +192,30 @@ async def rate_limit_middleware(request: Request, call_next):
 
 
 # ============================================================================
+# AUTH REQUEST MODELS
+# ============================================================================
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: str = ""
+    company: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+# ============================================================================
 # AUTH ENDPOINTS (database + JWT)
 # ============================================================================
 
 @app.post("/api/auth/register")
-async def register(email: str, password: str, name: str = "", background_tasks: BackgroundTasks = None, db: Session = Depends(get_db)):
+async def register(body: RegisterRequest, background_tasks: BackgroundTasks = None, db: Session = Depends(get_db)):
+    email = body.email
+    password = body.password
+    name = body.name
     existing = db.query(User).filter(User.email == email).first()
     if existing:
         raise HTTPException(status_code=400, detail="User already exists")
@@ -225,7 +244,9 @@ async def register(email: str, password: str, name: str = "", background_tasks: 
 
 
 @app.post("/api/auth/login")
-async def login(email: str, password: str, db: Session = Depends(get_db)):
+async def login(body: LoginRequest, db: Session = Depends(get_db)):
+    email = body.email
+    password = body.password
     user = db.query(User).filter(User.email == email).first()
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
