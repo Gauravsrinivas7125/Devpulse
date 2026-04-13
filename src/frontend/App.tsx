@@ -3,13 +3,14 @@
  * Central routing and layout for the entire frontend
  */
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, Component } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, Link } from 'react-router-dom';
 
 import { OnboardingWizard, NotificationContainer, showNotification } from './onboarding_notifications';
 import { ResponsiveNav, ResponsiveContainer } from './mobile_responsive';
 import DashboardPage from './dashboards';
 import AuthService from './auth-service';
+import { KillSwitchPage, ShadowAPIPage, PCICompliancePage, TokenAnalyticsPage, ForgotPasswordPage, ResetPasswordPage, PrivacyPolicyPage, TermsOfServicePage } from './pages';
 
 interface User {
   id: string;
@@ -107,6 +108,8 @@ const App: React.FC = () => {
           <Route path="/" element={<LandingPage />} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/signup" element={<SignupPage />} />
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+          <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Router>
@@ -134,17 +137,25 @@ const App: React.FC = () => {
 
         <main className="flex-1 overflow-auto">
           <ResponsiveContainer>
+            <ErrorBoundary>
             <Routes>
-              <Route path="/dashboard" element={<DashboardPage />} />
+              <Route path="/dashboard" element={<DashboardPage token={localStorage.getItem('devpulse_token')} />} />
               <Route path="/collections" element={<CollectionsPage />} />
               <Route path="/security" element={<SecurityPage />} />
               <Route path="/analytics" element={<AnalyticsPage />} />
               <Route path="/cost-intelligence" element={<CostIntelligencePage />} />
               <Route path="/webhooks" element={<WebhooksPage />} />
               <Route path="/compliance" element={<CompliancePage />} />
+              <Route path="/kill-switch" element={<KillSwitchPage />} />
+              <Route path="/shadow-api" element={<ShadowAPIPage />} />
+              <Route path="/pci-compliance" element={<PCICompliancePage />} />
+              <Route path="/token-analytics" element={<TokenAnalyticsPage />} />
               <Route path="/settings" element={<SettingsPage onLogout={handleLogout} />} />
+              <Route path="/privacy" element={<PrivacyPolicyPage />} />
+              <Route path="/terms" element={<TermsOfServicePage />} />
               <Route path="*" element={<Navigate to="/dashboard" replace />} />
             </Routes>
+            </ErrorBoundary>
           </ResponsiveContainer>
         </main>
 
@@ -175,6 +186,9 @@ const LandingPage: React.FC = () => (
             Sign in
           </Link>
         </div>
+        <p className="mt-4 text-sm text-slate-500">
+          <Link to="/forgot-password" className="hover:text-slate-300">Forgot your password?</Link>
+        </p>
       </div>
       <div className="mt-16 grid gap-6 md:grid-cols-3">
         {[
@@ -247,6 +261,9 @@ const LoginPage: React.FC = () => {
         </form>
         <p className="mt-4 text-center text-gray-600">
           Don&apos;t have an account? <Link to="/signup" className="text-blue-600 hover:underline">Sign up</Link>
+        </p>
+        <p className="mt-2 text-center text-gray-500 text-sm">
+          <Link to="/forgot-password" className="hover:text-blue-600">Forgot password?</Link>
         </p>
       </div>
     </div>
@@ -674,6 +691,7 @@ const SettingsPage: React.FC<{ onLogout: () => void }> = ({ onLogout }) => {
   const [teamMembers, setTeamMembers] = useState<Array<{id: string; email: string; role: string; status: string}>>([]);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('viewer');
+  const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
   const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
   useEffect(() => {
@@ -688,6 +706,60 @@ const SettingsPage: React.FC<{ onLogout: () => void }> = ({ onLogout }) => {
       if (teamData) setTeamMembers(teamData.members || []);
     }).catch(console.error);
   }, [API_URL]);
+
+  const handleCheckout = async (targetPlan: string) => {
+    setCheckoutLoading(targetPlan);
+    try {
+      const token = localStorage.getItem('devpulse_token');
+      const res = await fetch(`${API_URL}/api/billing/create-checkout-session`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ plan: targetPlan, success_url: window.location.origin + '/settings?billing=success', cancel_url: window.location.origin + '/settings?billing=cancelled' }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.checkout_url) {
+          window.location.href = data.checkout_url;
+        } else {
+          showNotification('error', 'Checkout Error', 'No checkout URL returned.');
+        }
+      } else {
+        const err = await res.json();
+        showNotification('error', 'Checkout Failed', err.detail || err.error || 'Failed to create checkout session.');
+      }
+    } catch (err) {
+      showNotification('error', 'Error', String(err));
+    } finally {
+      setCheckoutLoading(null);
+    }
+  };
+
+  const handleManageBilling = async () => {
+    try {
+      const token = localStorage.getItem('devpulse_token');
+      const res = await fetch(`${API_URL}/api/billing/portal-session`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ return_url: window.location.origin + '/settings' }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.portal_url) {
+          window.location.href = data.portal_url;
+        }
+      } else {
+        showNotification('error', 'Error', 'Failed to open billing portal.');
+      }
+    } catch (err) {
+      showNotification('error', 'Error', String(err));
+    }
+  };
 
   const inviteMember = async () => {
     if (!inviteEmail) return;
@@ -729,32 +801,87 @@ const SettingsPage: React.FC<{ onLogout: () => void }> = ({ onLogout }) => {
     }
   };
 
+  const currentPlan = plan?.plan || 'free';
+
+  const plans = [
+    {
+      name: 'free', label: 'Free', price: '$0', period: '/month',
+      features: ['5 API Collections', '10 Scans / month', 'Basic Risk Scoring', 'Community Support'],
+    },
+    {
+      name: 'pro', label: 'Pro', price: '$49', period: '/month', popular: true,
+      features: ['Unlimited Collections', '500 Scans / month', 'Advanced Risk Scoring', 'Kill Switch', 'Shadow API Scanner', 'PCI DSS Reports', 'Priority Support'],
+    },
+    {
+      name: 'enterprise', label: 'Enterprise', price: '$199', period: '/month',
+      features: ['Everything in Pro', 'Unlimited Scans', 'Custom Integrations', 'SSO / SAML', 'Dedicated Support', 'SLA Guarantee', 'Custom Compliance'],
+    },
+  ];
+
   return (
     <div className="p-6">
       <h1 className="mb-6 text-3xl font-bold">Settings</h1>
 
       {/* Plan & Billing */}
       <div className="mb-8 rounded-lg border bg-white p-6 shadow-sm" id="billing">
-        <h2 className="mb-4 text-xl font-semibold">Plan & Billing</h2>
-        <div className="flex items-center gap-4">
-          <div className="rounded-lg border-2 border-blue-200 bg-blue-50 px-6 py-4">
-            <p className="text-sm text-gray-600">Current Plan</p>
-            <p className="text-2xl font-bold capitalize text-blue-600">{plan?.plan || 'free'}</p>
-          </div>
-          {plan?.plan === 'free' && (
-            <button className="rounded-lg bg-gradient-to-r from-blue-600 to-purple-600 px-6 py-3 text-white hover:opacity-90">
-              Upgrade to Pro
+        <div className="mb-6 flex items-center justify-between">
+          <h2 className="text-xl font-semibold">Plan & Billing</h2>
+          {currentPlan !== 'free' && (
+            <button onClick={handleManageBilling} className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">
+              Manage Billing
             </button>
           )}
         </div>
-        {plan?.limits && (
-          <div className="mt-4 grid gap-3 md:grid-cols-3">
-            {Object.entries(plan.limits).map(([key, value]) => (
-              <div key={key} className="rounded border p-3">
-                <p className="text-xs text-gray-500">{key.replace(/_/g, ' ')}</p>
-                <p className="font-semibold">{typeof value === 'boolean' ? (value ? 'Included' : 'Not included') : String(value)}</p>
+
+        {/* Plan Comparison Cards */}
+        <div className="grid gap-4 md:grid-cols-3">
+          {plans.map((p) => (
+            <div key={p.name} className={`relative rounded-lg border-2 p-6 ${currentPlan === p.name ? 'border-blue-500 bg-blue-50' : p.popular ? 'border-purple-300' : 'border-gray-200'}`}>
+              {p.popular && currentPlan !== p.name && (
+                <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-purple-600 px-3 py-0.5 text-xs font-medium text-white">Most Popular</span>
+              )}
+              {currentPlan === p.name && (
+                <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-blue-600 px-3 py-0.5 text-xs font-medium text-white">Current Plan</span>
+              )}
+              <h3 className="mb-1 text-lg font-bold">{p.label}</h3>
+              <div className="mb-4">
+                <span className="text-3xl font-bold">{p.price}</span>
+                <span className="text-gray-500">{p.period}</span>
               </div>
-            ))}
+              <ul className="mb-6 space-y-2">
+                {p.features.map((f) => (
+                  <li key={f} className="flex items-center gap-2 text-sm text-gray-700">
+                    <svg className="h-4 w-4 flex-shrink-0 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                    {f}
+                  </li>
+                ))}
+              </ul>
+              {currentPlan === p.name ? (
+                <button disabled className="w-full rounded-lg bg-gray-200 px-4 py-2 text-sm text-gray-500">Current Plan</button>
+              ) : (
+                <button
+                  onClick={() => handleCheckout(p.name)}
+                  disabled={checkoutLoading !== null}
+                  className={`w-full rounded-lg px-4 py-2 text-sm font-medium text-white ${p.popular ? 'bg-gradient-to-r from-blue-600 to-purple-600 hover:opacity-90' : 'bg-gray-900 hover:bg-gray-700'} disabled:opacity-50`}
+                >
+                  {checkoutLoading === p.name ? 'Redirecting...' : currentPlan === 'enterprise' ? 'Switch Plan' : 'Upgrade'}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {plan?.limits && (
+          <div className="mt-6">
+            <h3 className="mb-3 text-sm font-semibold text-gray-500 uppercase">Your Plan Limits</h3>
+            <div className="grid gap-3 md:grid-cols-3">
+              {Object.entries(plan.limits).map(([key, value]) => (
+                <div key={key} className="rounded border p-3">
+                  <p className="text-xs text-gray-500">{key.replace(/_/g, ' ')}</p>
+                  <p className="font-semibold">{typeof value === 'boolean' ? (value ? 'Included' : 'Not included') : String(value)}</p>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -1278,5 +1405,49 @@ const WebhooksPage: React.FC = () => {
   );
 };
 
+
+// ============================================================================
+// ERROR BOUNDARY
+// ============================================================================
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class ErrorBoundary extends Component<{ children: React.ReactNode }, ErrorBoundaryState> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error('ErrorBoundary caught:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex min-h-[60vh] items-center justify-center p-8">
+          <div className="max-w-lg rounded-lg border border-red-200 bg-red-50 p-8 text-center shadow-lg">
+            <h2 className="mb-3 text-2xl font-bold text-red-800">Something went wrong</h2>
+            <p className="mb-4 text-red-600">{this.state.error?.message || 'An unexpected error occurred.'}</p>
+            <button
+              onClick={() => { this.setState({ hasError: false, error: null }); window.location.href = '/dashboard'; }}
+              className="rounded-lg bg-red-600 px-6 py-2 text-white hover:bg-red-700"
+            >
+              Return to Dashboard
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default App;

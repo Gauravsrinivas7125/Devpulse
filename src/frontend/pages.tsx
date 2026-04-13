@@ -3,8 +3,17 @@
  * Missing UI pages for Kill Switch, Shadow API, PCI Compliance, and Token Analytics
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+function getAuthHeaders(): Record<string, string> {
+  const token = localStorage.getItem('devpulse_token');
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
 
 /**
  * Kill Switch Page
@@ -13,7 +22,29 @@ export const KillSwitchPage: React.FC = () => {
   const [isActive, setIsActive] = useState(false);
   const [reason, setReason] = useState('');
   const [loading, setLoading] = useState(false);
-  const [history] = useState<any[]>([]);
+  const [history, setHistory] = useState<Array<{action: string; timestamp: string}>>([]);
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/kill-switch/status`, { headers: getAuthHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setIsActive(data.active || false);
+      }
+    } catch (err) { console.error('Error fetching kill switch status:', err); }
+  }, []);
+
+  const fetchAuditTrail = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/kill-switch/audit-trail`, { headers: getAuthHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setHistory(data.entries || []);
+      }
+    } catch (err) { console.error('Error fetching audit trail:', err); }
+  }, []);
+
+  useEffect(() => { void fetchStatus(); void fetchAuditTrail(); }, [fetchStatus, fetchAuditTrail]);
 
   const handleTrigger = async () => {
     if (!reason.trim()) {
@@ -23,16 +54,16 @@ export const KillSwitchPage: React.FC = () => {
 
     setLoading(true);
     try {
-      const response = await fetch('/api/kill-switch/trigger', {
+      const response = await fetch(`${API_URL}/api/kill-switch/block`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ reason })
       });
 
       if (response.ok) {
         setIsActive(true);
         setReason('');
-        alert('Kill switch activated! Slack alert sent.');
+        void fetchAuditTrail();
       }
     } catch (error) {
       console.error('Error triggering kill switch:', error);
@@ -44,13 +75,15 @@ export const KillSwitchPage: React.FC = () => {
   const handleDeactivate = async () => {
     setLoading(true);
     try {
-      const response = await fetch('/api/kill-switch/deactivate', {
-        method: 'POST'
+      const response = await fetch(`${API_URL}/api/kill-switch/block`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ reason: 'Deactivated by user' })
       });
 
       if (response.ok) {
         setIsActive(false);
-        alert('Kill switch deactivated');
+        void fetchAuditTrail();
       }
     } catch (error) {
       console.error('Error deactivating kill switch:', error);
@@ -124,25 +157,25 @@ export const KillSwitchPage: React.FC = () => {
  * Shadow API Detection Page
  */
 export const ShadowAPIPage: React.FC = () => {
-  const [shadowAPIs, setShadowAPIs] = useState<any[]>([]);
+  const [shadowAPIs, setShadowAPIs] = useState<Array<{endpoint: string; method: string; risk_level: string; request_count: number; first_seen: string}>>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
 
-  useEffect(() => {
-    fetchShadowAPIs();
-  }, []);
-
-  const fetchShadowAPIs = async () => {
+  const fetchShadowAPIs = useCallback(async () => {
     try {
-      const response = await fetch('/api/shadow-api/list');
-      const data = await response.json();
-      setShadowAPIs(data.apis || []);
+      const response = await fetch(`${API_URL}/api/shadow-api/scan-results`, { headers: getAuthHeaders() });
+      if (response.ok) {
+        const data = await response.json();
+        setShadowAPIs(data.shadow_apis || data.apis || []);
+      }
     } catch (error) {
       console.error('Error fetching shadow APIs:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => { void fetchShadowAPIs(); }, [fetchShadowAPIs]);
 
   const filteredAPIs = filter === 'all' 
     ? shadowAPIs 
@@ -203,38 +236,36 @@ export const ShadowAPIPage: React.FC = () => {
  * PCI Compliance Page
  */
 export const PCICompliancePage: React.FC = () => {
-  const [reports, setReports] = useState<any[]>([]);
+  const [reports, setReports] = useState<Array<{type: string; generated_at: string; compliance_percentage: number; passed_requirements: number; warning_requirements: number; failed_requirements: number}>>([]);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
 
-  useEffect(() => {
-    fetchReports();
-  }, []);
-
-  const fetchReports = async () => {
+  const fetchReports = useCallback(async () => {
     try {
-      const response = await fetch('/api/compliance/reports');
-      const data = await response.json();
-      setReports(data.reports || []);
+      const response = await fetch(`${API_URL}/api/compliance/pci-dss`, { headers: getAuthHeaders() });
+      if (response.ok) {
+        const data = await response.json();
+        setReports(data.reports || [data]);
+      }
     } catch (error) {
       console.error('Error fetching reports:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => { void fetchReports(); }, [fetchReports]);
 
   const generateReport = async () => {
     setGenerating(true);
     try {
-      const response = await fetch('/api/compliance/generate', {
+      const response = await fetch(`${API_URL}/api/compliance/pci-dss`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'PCI' })
+        headers: getAuthHeaders(),
       });
 
       if (response.ok) {
-        alert('Report generated successfully');
-        fetchReports();
+        void fetchReports();
       }
     } catch (error) {
       console.error('Error generating report:', error);
@@ -301,29 +332,58 @@ export const PCICompliancePage: React.FC = () => {
 /**
  * Token Analytics Page
  */
+interface TokenStats {
+  total_tokens: number;
+  total_cost: number;
+  average_daily_cost: number;
+  most_expensive_model: string;
+}
+
+interface DailyBreakdown {
+  date: string;
+  cost: number;
+}
+
+interface ModelBreakdown {
+  model: string;
+  tokens: number;
+  calls: number;
+  cost: number;
+}
+
 export const TokenAnalyticsPage: React.FC = () => {
-  const [stats, setStats] = useState<any>(null);
-  const [dailyData, setDailyData] = useState<any[]>([]);
-  const [modelData, setModelData] = useState<any[]>([]);
+  const [stats, setStats] = useState<TokenStats | null>(null);
+  const [dailyData, setDailyData] = useState<DailyBreakdown[]>([]);
+  const [modelData, setModelData] = useState<ModelBreakdown[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchAnalytics();
-  }, []);
-
-  const fetchAnalytics = async () => {
+  const fetchAnalytics = useCallback(async () => {
     try {
-      const response = await fetch('/api/tokens/analytics');
-      const data = await response.json();
-      setStats(data.stats);
-      setDailyData(data.daily_breakdown || []);
-      setModelData(data.model_breakdown || []);
+      const [summaryRes, dailyRes, modelRes] = await Promise.all([
+        fetch(`${API_URL}/api/cost-tracker/summary`, { headers: getAuthHeaders() }),
+        fetch(`${API_URL}/api/cost-tracker/daily`, { headers: getAuthHeaders() }),
+        fetch(`${API_URL}/api/cost-tracker/by-model`, { headers: getAuthHeaders() }),
+      ]);
+      if (summaryRes.ok) {
+        const data = await summaryRes.json();
+        setStats({ total_tokens: data.total_requests || 0, total_cost: data.total_cost_usd || 0, average_daily_cost: (data.total_cost_usd || 0) / 30, most_expensive_model: 'N/A' });
+      }
+      if (dailyRes.ok) {
+        const data = await dailyRes.json();
+        setDailyData(data.daily_costs || []);
+      }
+      if (modelRes.ok) {
+        const data = await modelRes.json();
+        setModelData(data.models || []);
+      }
     } catch (error) {
       console.error('Error fetching analytics:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => { void fetchAnalytics(); }, [fetchAnalytics]);
 
   if (loading) return <p>Loading...</p>;
 
@@ -434,7 +494,7 @@ export const ForgotPasswordPage: React.FC = () => {
     setLoading(true);
     setError('');
     try {
-      await fetch('/api/auth/forgot-password', {
+      await fetch(`${API_URL}/api/auth/forgot-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email })
@@ -506,7 +566,7 @@ export const ResetPasswordPage: React.FC = () => {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch('/api/auth/reset-password', {
+      const res = await fetch(`${API_URL}/api/auth/reset-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token, new_password: newPassword })
@@ -583,11 +643,71 @@ export const ResetPasswordPage: React.FC = () => {
   );
 };
 
+/**
+ * Privacy Policy Page
+ */
+export const PrivacyPolicyPage: React.FC = () => {
+  const [content, setContent] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`${API_URL}/api/legal/privacy-policy`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setContent(data.content); })
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white p-8">
+      <div className="max-w-3xl mx-auto">
+        <a href="/" className="text-blue-400 hover:underline text-sm mb-6 block">&larr; Back to DevPulse</a>
+        {loading ? (
+          <p className="text-gray-400">Loading...</p>
+        ) : (
+          <div className="prose prose-invert max-w-none whitespace-pre-wrap">{content}</div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/**
+ * Terms of Service Page
+ */
+export const TermsOfServicePage: React.FC = () => {
+  const [content, setContent] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`${API_URL}/api/legal/terms-of-service`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setContent(data.content); })
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white p-8">
+      <div className="max-w-3xl mx-auto">
+        <a href="/" className="text-blue-400 hover:underline text-sm mb-6 block">&larr; Back to DevPulse</a>
+        {loading ? (
+          <p className="text-gray-400">Loading...</p>
+        ) : (
+          <div className="prose prose-invert max-w-none whitespace-pre-wrap">{content}</div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 export default {
   KillSwitchPage,
   ShadowAPIPage,
   PCICompliancePage,
   TokenAnalyticsPage,
   ForgotPasswordPage,
-  ResetPasswordPage
+  ResetPasswordPage,
+  PrivacyPolicyPage,
+  TermsOfServicePage
 };

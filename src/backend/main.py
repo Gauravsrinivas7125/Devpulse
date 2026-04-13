@@ -38,6 +38,7 @@ from .admin_endpoints import router as admin_router
 from .team_endpoints import router as team_router
 from .stripe_webhook_handler import get_webhook_handler
 from .plan_enforcement import get_plan_enforcer, PlanLimits
+from .csrf_protection import CSRFTokenManager, CSRFMiddleware
 from .auth_service import QuickStartService
 from .auth_service_db import AuthServiceDB, SECRET_KEY, ALGORITHM
 from .redis_client import redis_client
@@ -103,6 +104,8 @@ shadow_scanner = ShadowAPIScanner()
 pci_generator = PCIComplianceGenerator()
 token_tracker = ThinkingTokenTracker()
 pdf_generator = PDFReportGenerator()
+csrf_token_manager = CSRFTokenManager()
+csrf_middleware = CSRFMiddleware(csrf_token_manager)
 
 quick_start = QuickStartService()
 
@@ -816,11 +819,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
     body = await request.body()
     signature = request.headers.get("stripe-signature", "")
-    def db_user_lookup(user_id):
-        return db.query(User).filter(User.id == user_id).first()
+    def db_user_lookup(stripe_customer_id):
+        return db.query(User).filter(User.stripe_customer_id == stripe_customer_id).first()
     webhook_handler = get_webhook_handler(db_user_lookup)
     result = webhook_handler.verify_and_process_webhook(body.decode(), signature)
-    if not result.get("success"):
+    if result.get("success"):
+        db.commit()
+    else:
+        db.rollback()
         raise HTTPException(status_code=400, detail=result.get("error", "Webhook processing failed"))
     return result
 
@@ -841,13 +847,88 @@ async def get_plan_limits(user_id: str = Depends(verify_token), db: Session = De
 async def check_feature(feature: str, user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     plan = user.plan if user else "free"
-    allowed = True
+    limits = PlanLimits.get_limits(plan)
+    # Boolean features are checked directly; numeric limits always allowed
+    feature_key = feature.replace("-", "_")
+    if feature_key in limits:
+        value = limits[feature_key]
+        if isinstance(value, bool):
+            allowed = value
+        else:
+            allowed = True
+    else:
+        allowed = plan != "free"
     return {"feature": feature, "allowed": allowed, "plan": plan, "upgrade_url": "/settings#billing" if not allowed else None}
 
 
 # ============================================================================
-# BILLING CUSTOMER LINKING (database)
+# BILLING / STRIPE CHECKOUT (database)
 # ============================================================================
+
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_PRICE_PRO = os.getenv("STRIPE_PRICE_PRO", "")
+STRIPE_PRICE_ENTERPRISE = os.getenv("STRIPE_PRICE_ENTERPRISE", "")
+
+
+class CheckoutRequest(BaseModel):
+    plan: str
+    success_url: str
+    cancel_url: str
+
+
+class PortalRequest(BaseModel):
+    return_url: str
+
+
+@app.post("/api/billing/create-checkout-session")
+async def create_checkout_session(req: CheckoutRequest, user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured. Set STRIPE_SECRET_KEY environment variable.")
+    import stripe as stripe_lib
+    stripe_lib.api_key = STRIPE_SECRET_KEY
+
+    price_id = STRIPE_PRICE_PRO if req.plan == "pro" else STRIPE_PRICE_ENTERPRISE
+    if not price_id:
+        raise HTTPException(status_code=400, detail=f"No Stripe price configured for plan: {req.plan}")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    session_params: dict = {
+        "mode": "subscription",
+        "line_items": [{"price": price_id, "quantity": 1}],
+        "success_url": req.success_url,
+        "cancel_url": req.cancel_url,
+        "metadata": {"user_id": user_id, "plan": req.plan},
+    }
+    if user.stripe_customer_id:
+        session_params["customer"] = user.stripe_customer_id
+    else:
+        session_params["customer_email"] = user.email
+
+    session = stripe_lib.checkout.Session.create(**session_params)
+    crud.log_audit_event(db, action="billing.checkout_started", resource_type="user", user_id=user_id)
+    return {"checkout_url": session.url, "session_id": session.id}
+
+
+@app.post("/api/billing/portal-session")
+async def create_portal_session(req: PortalRequest, user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured. Set STRIPE_SECRET_KEY environment variable.")
+    import stripe as stripe_lib
+    stripe_lib.api_key = STRIPE_SECRET_KEY
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.stripe_customer_id:
+        raise HTTPException(status_code=400, detail="No Stripe customer linked to this account.")
+
+    session = stripe_lib.billing_portal.Session.create(
+        customer=user.stripe_customer_id,
+        return_url=req.return_url,
+    )
+    return {"portal_url": session.url}
+
 
 @app.post("/api/billing/link-customer")
 async def link_stripe_customer(stripe_customer_id: str, user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
@@ -1065,6 +1146,18 @@ async def admin_audit_log(user_id: str = Depends(verify_token), db: Session = De
 # HEALTH & STATUS (database)
 # ============================================================================
 
+@app.get("/api/csrf-token")
+async def get_csrf_token(user_id: str = Depends(verify_token)):
+    token = csrf_token_manager.generate_token(user_id)
+    return {"csrf_token": token}
+
+
+@app.post("/api/auth/forgot-password")
+async def forgot_password(email: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Alias for /api/auth/request-password-reset used by frontend"""
+    return await request_password_reset(email=email, background_tasks=background_tasks, db=db)
+
+
 @app.get("/api/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat(), "version": "1.0.0", "database": "connected"}
@@ -1072,8 +1165,10 @@ async def health_check():
 
 @app.get("/api/status")
 async def get_status(db: Session = Depends(get_db)):
+    total_scans = db.query(func.count(Scan.id)).scalar() or 0
     return {"collections": db.query(func.count(Collection.id)).scalar() or 0,
-            "scans": db.query(func.count(Scan.id)).scalar() or 0,
+            "scans": total_scans,
+            "total_scans": total_scans,
             "users": db.query(func.count(User.id)).scalar() or 0,
             "blocked_requests": kill_switch.get_blocked_count()}
 
@@ -1339,6 +1434,33 @@ async def compare_scan_sessions(baseline_session_id: str, compare_session_id: st
 @app.get("/api/scan-sessions/stats")
 async def get_scan_stats(user_id: str = Depends(verify_token)):
     return scan_session_history.get_user_stats(user_id)
+
+
+# ============================================================================
+# LEGAL DOCUMENTS
+# ============================================================================
+
+@app.get("/api/legal/privacy-policy")
+async def get_privacy_policy():
+    legal_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "legal", "privacy-policy.md")
+    if os.path.exists(legal_path):
+        with open(legal_path, "r") as f:
+            return {"content": f.read(), "format": "markdown"}
+    return {"content": "Privacy policy not available.", "format": "text"}
+
+
+@app.get("/api/legal/terms-of-service")
+async def get_terms_of_service():
+    legal_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "legal", "terms-of-service.md")
+    if os.path.exists(legal_path):
+        with open(legal_path, "r") as f:
+            return {"content": f.read(), "format": "markdown"}
+    # Fallback to root TERMS_OF_SERVICE.md
+    root_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "TERMS_OF_SERVICE.md")
+    if os.path.exists(root_path):
+        with open(root_path, "r") as f:
+            return {"content": f.read(), "format": "markdown"}
+    return {"content": "Terms of service not available.", "format": "text"}
 
 
 # ============================================================================
